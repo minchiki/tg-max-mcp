@@ -391,7 +391,7 @@ def test_gemini_is_chosen_by_key_and_request_is_well_formed(monkeypatch):
     assert agent.brain() == "gemini"
     d = run(agent.decide(T, H, [dict(who="Даниил", text="привет", id=1, ts=0)], False))
     assert d == dict(action="reply", text="Привет, давай в 6?", reason="")
-    assert "gemini-3.8-flash:generateContent" in seen["url"] and "AIza" not in seen["url"] and seen["key"] == "AIza-test-key"
+    assert "gemini-3.6-flash:generateContent" in seen["url"] and "AIza" not in seen["url"] and seen["key"] == "AIza-test-key"
     assert "responseMimeType" in seen["body"] and "<chat>" in seen["body"] and "встреча" in seen["body"]
 
 
@@ -467,7 +467,7 @@ def test_brain_selection_and_missing_key(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     assert agent.brain() == "anthropic" and agent.api_key_missing()
     monkeypatch.setenv("GEMINI_API_KEY", "x")
-    assert agent.brain() == "gemini" and not agent.api_key_missing() and agent.model_name() == "gemini-3.8-flash"
+    assert agent.brain() == "gemini" and not agent.api_key_missing() and agent.model_name() == "gemini-3.6-flash"
     monkeypatch.setenv("AGENT_BRAIN", "anthropic")
     assert agent.brain() == "anthropic" and agent.api_key_missing() and agent.model_name() == "claude-opus-5-5"
 
@@ -487,10 +487,24 @@ def test_gemini_overloaded_main_model_falls_back_to_lite(monkeypatch):
     def handler(req):
         model = str(req.url).split("/models/")[1].split(":")[0]
         models.append(model)
-        if model == "gemini-3.8-flash":
+        if model == "gemini-3.6-flash":
             return httpx.Response(503, json={"error": {"message": "high demand"}})
         return _ok('{"action":"reply","text":"ок","reason":""}')
 
     _gemini_world(monkeypatch, handler)
     d = run(agent.decide(T, H, [], False))
-    assert d["text"] == "ок" and models[0] == "gemini-3.8-flash" and models[-1] == "gemini-3.5-flash-lite"
+    assert d["text"] == "ок" and models[0] == "gemini-3.6-flash" and models[-1] == "gemini-3.5-flash-lite"
+
+
+def test_gemini_connection_drop_also_falls_back(monkeypatch):
+    models = []
+
+    def handler(req):
+        model = str(req.url).split("/models/")[1].split(":")[0]
+        models.append(model)
+        if model == "gemini-3.6-flash":
+            raise httpx.RemoteProtocolError("Server disconnected")
+        return _ok('{"action":"wait","text":"","reason":""}')
+
+    _gemini_world(monkeypatch, handler)
+    assert run(agent.decide(T, H, [], False))["action"] == "wait" and models == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]

@@ -29,7 +29,7 @@ NETS = dialogs.NETS
 LABEL = dialogs.LABEL
 EFFORT = os.environ.get("AGENT_EFFORT", "low")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_DEFAULT = "gemini-3.8-flash"
+GEMINI_DEFAULT = "gemini-3.6-flash"  # 3.8-flash в день проверки была перегружена (503, обрывы): основной выбрана стабильная
 GEMINI_FALLBACK = os.environ.get("AGENT_FALLBACK_MODEL", "gemini-3.5-flash-lite")  # если основная перегружена или упёрлась в лимит
 ANTHROPIC_DEFAULT = "claude-opus-5-5"
 DEBOUNCE = float(os.environ.get("AGENT_DEBOUNCE", "5"))        # пауза: люди пишут очередями из нескольких сообщений
@@ -157,7 +157,7 @@ def _proxy():
 
 def _http():
     import httpx
-    return httpx.AsyncClient(proxy=_proxy(), timeout=60)
+    return httpx.AsyncClient(proxy=_proxy(), timeout=30)
 
 
 def _client():
@@ -237,6 +237,7 @@ async def _gemini_call(http, body, model):
 
 
 async def _decide_gemini(prompt):
+    import httpx
     body = {"systemInstruction": {"parts": [{"text": SYSTEM}]},
             "contents": [{"role": "user", "parts": [{"text": prompt + JSON_HINT}]}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7, "maxOutputTokens": 2000}}
@@ -248,10 +249,10 @@ async def _decide_gemini(prompt):
         for attempt in range(4):
             try:
                 r = await _gemini_call(http, body, model)
-            except (RateLimitError, ServerBusyError):
+            except (RateLimitError, ServerBusyError, httpx.TransportError) as e:  # перегрузка, лимит, обрыв соединения
                 if attempt == 3:
-                    raise
-                if attempt >= 1 and model != GEMINI_FALLBACK and not os.environ.get("AGENT_NO_FALLBACK"):
+                    raise ServerBusyError(f"Gemini недоступен ({type(e).__name__})") if isinstance(e, httpx.TransportError) else e
+                if model != GEMINI_FALLBACK and not os.environ.get("AGENT_NO_FALLBACK"):
                     _log(f"gemini {model} unavailable, switching to {GEMINI_FALLBACK}")
                     model = GEMINI_FALLBACK
                 await asyncio.sleep(4 * (attempt + 1))  # бесплатный тариф: несколько запросов в минуту
