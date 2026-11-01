@@ -3,7 +3,6 @@ import asyncio
 import sys
 from datetime import datetime
 
-import httpx
 from pymax import File, Photo, Video
 from pymax.types.domain.attachments.enums import PollFlags
 from pymax.types.domain.attachments.poll import Poll, PollAnswer
@@ -153,10 +152,8 @@ def register(tool, send_guard, mark_sent, Image):
                     if (u := getattr(a, "base_url", None) or getattr(a, "thumbnail", None))), None)
         if not url:
             return "В сообщении нет фото или видео."
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as h:
-            r = await h.get(url)
-            r.raise_for_status()
-        return [f"{kind(m)} из сообщения #{m.id}", Image(data=r.content, format="jpeg")]
+        data, _, _ = await media.get(url, 20 * 1024 * 1024)  # ссылка из чужого сообщения: только публичные адреса
+        return [f"{kind(m)} из сообщения #{m.id}", Image(data=data, format="jpeg")]
 
     @tool()
     async def max_chat_members(chat: str, limit: int = 50) -> str:

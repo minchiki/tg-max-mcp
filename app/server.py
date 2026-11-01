@@ -614,7 +614,10 @@ if max_tools and os.environ.get("MAX_ENABLED", "1") != "0":
 
 
 class DebugLog:
-    """TG_DEBUG=1: пишет в журнал заголовки запросов, начало тела и ответы с ошибкой."""
+    """TG_DEBUG=1: пишет в журнал заголовки запросов и ответы с ошибкой.
+
+    Тело запроса не пишется: в нём аргументы инструментов, то есть тексты сообщений.
+    """
 
     def __init__(self, app):
         self.app = app
@@ -626,12 +629,6 @@ class DebugLog:
         print(f"DEBUG {scope['method']} headers={hdrs}", file=sys.stderr, flush=True)
         status = {}
 
-        async def recv():
-            m = await receive()
-            if m["type"] == "http.request" and m.get("body"):
-                print(f"DEBUG body={m['body'][:400]!r}", file=sys.stderr, flush=True)
-            return m
-
         async def snd(m):
             if m["type"] == "http.response.start":
                 status["code"] = m["status"]
@@ -639,7 +636,7 @@ class DebugLog:
                 print(f"DEBUG {status['code']} body={m.get('body', b'')[:400]!r}", file=sys.stderr, flush=True)
             await send(m)
 
-        await self.app(scope, recv, snd)
+        await self.app(scope, receive, snd)
 
 
 if __name__ == "__main__":
@@ -648,4 +645,5 @@ if __name__ == "__main__":
     else:
         import uvicorn
         app = mcp.streamable_http_app(host=HOST, **HTTP_OPTS)
-        uvicorn.run(DebugLog(app) if os.environ.get("TG_DEBUG") else app, host=HOST, port=PORT)
+        # access_log выключен: в пути лежит секрет (/<TG_SECRET>/mcp)
+        uvicorn.run(DebugLog(app) if os.environ.get("TG_DEBUG") else app, host=HOST, port=PORT, access_log=False)
