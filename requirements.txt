@@ -1,0 +1,7 @@
+mcp>=2.3,<3
+telethon>=1.40
+python-socks[asyncio]>=2.4
+qrcode>=7.4
+httpx>=0.27
+uvicorn>=0.30
+maxapi-python[video]>=2.5

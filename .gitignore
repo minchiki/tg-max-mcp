@@ -1,0 +1,14 @@
+# сессии и секреты — никогда не коммитить
+*.session
+*.session-journal
+*.db
+.env
+env
+data/
+.secret
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vercel/

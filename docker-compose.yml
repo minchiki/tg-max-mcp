@@ -1,0 +1,10 @@
+services:
+  tg-mcp:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    # наружу только на localhost: HTTPS даёт ваш nginx/Caddy/Cloudflare Tunnel
+    ports:
+      - "127.0.0.1:8765:8765"

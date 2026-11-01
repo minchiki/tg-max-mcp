@@ -1,0 +1,30 @@
+name: check
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: tools register
+        working-directory: app
+        env:
+          TG_API_ID: "1"
+          TG_API_HASH: x
+          TG_SECRET: ci-secret-ci-secret-ci-secret-00
+        run: |
+          python - <<'EOF'
+          import asyncio, sys
+          sys.argv = ["server.py"]
+          import server
+          tools = asyncio.run(server.mcp.list_tools())
+          print(len(tools), "tools")
+          assert len(tools) > 50
+          EOF
+      - name: shell syntax
+        run: for f in deploy/*.sh; do bash -n "$f"; done
