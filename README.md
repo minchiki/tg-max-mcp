@@ -14,7 +14,8 @@
 
 Сервер ставится **на ваш VPS**: сессии мессенджеров не уходят третьим лицам.
 
-- 61 инструмент: 39 для Telegram, 22 для MAX
+- 65 инструментов: 41 для Telegram, 24 для MAX
+- **вся история чата**: сообщения за любой период и любой глубины (год назад, март 2025, до 5000 за вызов), поиск по периоду и автору, обзор активности по месяцам
 - работает с ChatGPT (веб и телефон), Claude, Claude Code, Cursor — через HTTP или stdio
 - постоянное подключение к мессенджерам, без входа на каждый запрос (в наших замерах ~0,1 с на вызов)
 - белые списки и лимит отправки, режим «только чтение», защита от инструкций в чужих сообщениях
@@ -25,12 +26,13 @@
 ## Что умеет
 
 <details open>
-<summary><b>Telegram — 39 инструментов</b> (Telethon, вход по QR)</summary>
+<summary><b>Telegram — 41 инструмент</b> (Telethon, вход по QR)</summary>
 
 | | Инструменты |
 |---|---|
 | **Чаты** | `list_chats` (в т. ч. архив), `list_folders`, `chat_info` (+ участники), `list_contacts`, `get_common_chats` |
-| **Чтение** | `read_messages`, `get_message_context`, `search_messages` (в чате или по всем чатам), `get_pinned_messages`, `get_scheduled_messages`, `get_drafts` |
+| **Чтение** | `read_messages` (любой период и глубина), `get_message_context`, `get_pinned_messages`, `get_scheduled_messages`, `get_drafts` |
+| **История** | `search_messages` (в чате или по всем чатам, за период, от автора), `messages_around_date` — «прыгнуть» к дате, `chat_timeline` — сколько сообщений в каждом месяце/неделе/году |
 | **Медиа** | `get_media` — показать фото/стикер/превью видео ассистенту, `send_file`, `send_album` |
 | **Отправка** | `send_message` (ответ, отложенная отправка), `forward_messages`, `send_poll` (викторина, мультивыбор, анонимный), `vote_poll` |
 | **Боты** | `list_buttons`, `press_button` — инлайн-кнопки |
@@ -41,11 +43,12 @@
 </details>
 
 <details open>
-<summary><b>MAX — 22 инструмента</b> (неофициальный web-протокол через <a href="https://github.com/MaxApiTeam/PyMax">PyMax</a>, вход по QR)</summary>
+<summary><b>MAX — 24 инструмента</b> (неофициальный web-протокол через <a href="https://github.com/MaxApiTeam/PyMax">PyMax</a>, вход по QR)</summary>
 
 | | Инструменты |
 |---|---|
-| **Чтение** | `max_list_chats`, `max_list_folders`, `max_read_messages`, `max_search_messages`, `max_chat_members`, `max_get_profile` |
+| **Чтение** | `max_list_chats`, `max_list_folders`, `max_read_messages` (любой период и глубина), `max_chat_members`, `max_get_profile` |
+| **История** | `max_search_messages` (до 20 000 сообщений, за период), `max_messages_around_date`, `max_chat_timeline` — активность по периодам и самые активные участники |
 | **Медиа** | `max_get_media`, `max_send_file` |
 | **Отправка** | `max_send_message`, `max_send_poll`, `max_vote_poll`, `max_forward_message` |
 | **Управление** | `max_edit_message`, `max_delete_messages`, `max_pin_message`, `max_react`, `max_mark_read` |
@@ -53,6 +56,17 @@
 | **Профиль** | `max_update_profile`, `max_set_avatar` |
 
 </details>
+
+### История за любой период
+
+Просите словами, ассистент сам подставит даты:
+
+- «покажи переписку с Даниилом за март 2025» → `read_messages(date_from="2025-03", date_to="2025-03", limit=5000)`
+- «что мне писали год назад» → `messages_around_date(when="год назад")`
+- «когда мы больше всего общались» → `chat_timeline` (по месяцам) и затем чтение нужного месяца
+- «найди, где обсуждали договор, весной» → `search_messages(query="договор", date_from="2026-03", date_to="2026-05")`
+
+Даты понимаются в форматах `2025-11-01`, `2025-11-01 14:30`, `31.10.2025`, `2025-03` (месяц), `2025` (год), `1y`, `6m`, `30d`, «год назад», «полгода назад». За один вызов — до 5000 сообщений и около 80 000 символов; если ответ обрезан, в конце будет подсказка `before_id`, с которой чтение продолжается дальше в прошлое. Telegram отдаёт историю за ~1 с на 500 сообщений, MAX — ещё быстрее.
 
 Файлы можно передавать ссылкой или прикрепить прямо в чате ChatGPT — сервер объявляет параметры-файлы через `openai/fileParams`.
 

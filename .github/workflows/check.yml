@@ -10,7 +10,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest tests -q
       - name: tools register
         working-directory: app
         env:
@@ -24,7 +25,7 @@ jobs:
           import server
           tools = asyncio.run(server.mcp.list_tools())
           print(len(tools), "tools")
-          assert len(tools) > 50
+          assert len(tools) >= 65
           EOF
       - name: shell syntax
         run: for f in deploy/*.sh; do bash -n "$f"; done

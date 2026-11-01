@@ -22,6 +22,7 @@ from mcp.types import ToolAnnotations
 from telethon import functions, types
 
 import media
+from dates import parse_when
 from safety import INSTRUCTIONS, clean, name
 from tgcfg import make_client
 
@@ -123,12 +124,43 @@ def kind(m):
     return "<медиа>" if m.media else ""
 
 
-def fmt(m):
-    who = "я" if m.out else m.sender_id
+def fmt(m, text_limit=4000):
+    s = m.sender
+    who = "я" if m.out else (person(s) if s is not None else m.sender_id)
     reply = f" ↩{m.reply_to_msg_id}" if m.reply_to_msg_id else ""
     btn = " [кнопки]" if m.buttons else ""
-    body = " ".join(x for x in (kind(m), clean(m.text)) if x)
+    body = " ".join(x for x in (kind(m), clean(m.text, text_limit)) if x)
     return f"#{m.id} [{m.date.astimezone(TZ):%Y-%m-%d %H:%M}] {who}{reply}{btn}: {body}"
+
+
+HISTORY_MAX = 5000      # сообщений за один вызов
+HISTORY_CHARS = 80000   # символов в ответе: больше ChatGPT всё равно не прочитает
+
+
+async def history(c, ent, limit, date_from="", date_to="", before_id=0, text_limit=1000, search=None, from_user=None,
+                  prefix=lambda m: ""):
+    """Сообщения от новых к старым с отсечкой по датам и размеру; возвращает (строки от старых к новым, подсказка)."""
+    lo, hi = parse_when(date_from, TZ), parse_when(date_to, TZ, end=True)
+    if lo and hi and lo > hi:
+        raise ValueError("date_from позже date_to")
+    limit = max(1, min(limit, HISTORY_MAX))
+    out, size, oldest, stopped = [], 0, None, False
+    async for m in c.iter_messages(ent, search=search, from_user=from_user, offset_id=before_id or 0, offset_date=hi,
+                                   wait_time=0):
+        if lo and m.date < lo:
+            break
+        line = prefix(m) + fmt(m, text_limit)
+        if out and (len(out) >= limit or size + len(line) > HISTORY_CHARS):
+            stopped = True
+            break
+        out.append(line)
+        size += len(line) + 1
+        oldest = m
+    if not stopped:
+        return list(reversed(out)), ""
+    # в одном чате продолжают по id, при сквозном поиске id у чатов свои — по дате
+    cont = f"before_id={oldest.id}" if ent is not None else f"date_to={oldest.date.astimezone(TZ):%Y-%m-%d %H:%M:%S}"
+    return list(reversed(out)), f"… показано {len(out)}, есть более старые. Продолжить: {cont}" + (f", date_from={date_from}" if date_from else "")
 
 
 def send_guard(net, chat, text=None):
@@ -194,11 +226,74 @@ async def list_folders() -> str:
 
 
 @tool()
-async def read_messages(chat: str, limit: int = 30) -> str:
-    """Последние сообщения чата (id или @username из list_chats; "me" = Избранное). #N — id сообщения."""
+async def read_messages(chat: str, limit: int = 30, before_id: int = 0, date_from: str = "", date_to: str = "",
+                        text_limit: int = 1000) -> str:
+    """История чата (id или @username из list_chats; "me" = Избранное), старые сверху. #N — id сообщения.
+
+    Любая глубина: limit до 5000. date_from / date_to — период (2025-03, 2025-11-01 14:30, 31.10.2025, 1y, «год назад»):
+    «сообщения за март прошлого года» = date_from=2025-03, date_to=2025-03, limit=5000.
+    Без date_from просто limit последних до date_to. Если ответ обрезан, в конце подсказка before_id для продолжения.
+    text_limit — обрезать длинные сообщения."""
     c, ent = await peer(chat)
-    msgs = [fmt(m) async for m in c.iter_messages(ent, limit=limit)]
-    return "\n".join(reversed(msgs))
+    lines, hint = await history(c, ent, limit, date_from, date_to, before_id, text_limit)
+    head = f"{len(lines)} сообщений" + (f", с {lines[0][lines[0].index('[') + 1:][:16]} по {lines[-1][lines[-1].index('[') + 1:][:16]}" if lines else "")
+    return "\n".join([head, *lines, *([hint] if hint else [])]) if lines else "Сообщений за этот период нет."
+
+
+@tool()
+async def messages_around_date(chat: str, when: str, around: int = 10) -> str:
+    """Сообщения вокруг даты: around до и around после (2025-03-14, «год назад», 31.10.2025 18:00). Чтобы «прыгнуть» в прошлое."""
+    c, ent = await peer(chat)
+    t = parse_when(when, TZ)
+    if t is None:
+        raise ValueError("Укажите дату")
+    around = max(1, min(around, 200))
+    before = [m async for m in c.iter_messages(ent, offset_date=t, limit=around)]
+    after = [m async for m in c.iter_messages(ent, offset_date=t, limit=around, reverse=True)]
+    return "\n".join(fmt(m, 600) for m in [*reversed(before), *after]) or "Рядом с этой датой сообщений нет."
+
+
+@tool()
+async def chat_timeline(chat: str, date_from: str = "", date_to: str = "", step: str = "month") -> str:
+    """Активность чата по периодам: сколько сообщений было в каждом месяце/неделе/году (step: year, month, week).
+
+    Быстро находит, когда шла переписка; потом читайте нужный месяц через read_messages(date_from, date_to)."""
+    c, ent = await peer(chat)
+    first = (await c.get_messages(ent, limit=1, reverse=True))
+    if not first:
+        return "В чате нет сообщений."
+    floor = first[0].date.astimezone(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    lo = max(parse_when(date_from, TZ) or floor, floor)
+    hi = parse_when(date_to, TZ, end=True) or datetime.now(TZ)
+    edges, t = [], lo.replace(day=1, hour=0, minute=0, second=0, microsecond=0) if step == "month" else lo
+    if step == "year":
+        t = lo.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif step == "week":
+        t = (lo - timedelta(days=lo.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    while t <= hi and len(edges) < (60 if step == "week" else 150):
+        nxt = (t.replace(year=t.year + 1) if step == "year" else t + timedelta(days=7) if step == "week"
+               else t.replace(year=t.year + (t.month == 12), month=t.month % 12 + 1))
+        edges.append((t, nxt - timedelta(seconds=1)))
+        t = nxt
+
+    async def newer(x):
+        """Сколько сообщений новее момента x: позицию в истории отдаёт сам Telegram (поиск с датами счёт не режет)."""
+        r = await c(functions.messages.GetHistoryRequest(peer=ent, offset_id=0, offset_date=x, add_offset=0, limit=1,
+                                                         max_id=0, min_id=0, hash=0))
+        if not r.messages:  # x старше всех сообщений
+            return getattr(r, "count", 0)
+        return getattr(r, "offset_id_offset", None) or 0
+
+    bounds = [lo] + [b + timedelta(seconds=1) for _, b in edges]
+    bounds[-1] = min(bounds[-1], hi)
+    pos = []
+    for i in range(0, len(bounds), 3):  # по 3 запроса, чтобы не упереться в лимиты Telegram
+        pos += await asyncio.gather(*(newer(x) for x in bounds[i:i + 3]))
+    counts = [max(0, pos[i] - pos[i + 1]) for i in range(len(edges))]
+    top = max(counts) or 1
+    label = {"year": "%Y", "month": "%Y-%m", "week": "%Y-%m-%d"}.get(step, "%Y-%m")
+    rows = [f"{a:{label}}  {n:>6}  {'█' * max(1 if n else 0, round(24 * n / top))}" for (a, _), n in zip(edges, counts)]
+    return f"Первое сообщение: {first[0].date.astimezone(TZ):%Y-%m-%d}. Всего за период: {sum(counts)}\n" + "\n".join(rows)
 
 
 @tool()
@@ -211,14 +306,18 @@ async def get_message_context(chat: str, message_id: int, around: int = 5) -> st
 
 
 @tool()
-async def search_messages(query: str, chat: str = "", limit: int = 20) -> str:
-    """Поиск по тексту: в одном чате или (chat пустой) по всем чатам."""
+async def search_messages(query: str, chat: str = "", limit: int = 20, date_from: str = "", date_to: str = "",
+                          from_user: str = "", before_id: int = 0) -> str:
+    """Поиск по тексту: в одном чате или (chat пустой) по всем чатам; за любой период и от конкретного автора.
+
+    date_from / date_to — период (2025-03, 31.10.2025, «год назад»), from_user — id или @username автора.
+    limit до 5000; длинный ответ обрезается с подсказкой before_id."""
     c = await tg()
     ent = await resolve(c, norm(chat)) if chat else None
-    out = []
-    async for m in c.iter_messages(ent, search=query, limit=limit):
-        out.append((f"[чат {m.chat_id}] " if ent is None else "") + fmt(m))
-    return "\n".join(out) or "Ничего не найдено."
+    sender = await resolve(c, norm(from_user)) if from_user else None
+    lines, hint = await history(c, ent, limit, date_from, date_to, before_id, 600, search=query, from_user=sender,
+                                prefix=(lambda m: f"[чат {m.chat_id}] ") if ent is None else (lambda m: ""))
+    return "\n".join([*lines, *([hint] if hint else [])]) or "Ничего не найдено."
 
 
 @tool()

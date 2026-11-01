@@ -1,15 +1,23 @@
 """Инструменты MAX (web.max.ru) для того же MCP-сервера. Вход: sudo bash deploy/max_login.sh."""
 import asyncio
+import collections
+import os
 import sys
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from pymax import File, Photo, Video
 from pymax.types.domain.attachments.enums import PollFlags
 from pymax.types.domain.attachments.poll import Poll, PollAnswer
 
 import media
+from dates import parse_when
 from maxcfg import make_client, session_exists
 from safety import clean, name
+
+TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Moscow"))
+HISTORY_MAX = 5000      # сообщений за один вызов
+HISTORY_CHARS = 80000   # символов в ответе: больше ChatGPT всё равно не прочитает
 
 _client = None
 _lock = asyncio.Lock()
@@ -73,18 +81,59 @@ def kind(m):
     return " ".join(out)
 
 
-def fmt(m, who):
-    t = datetime.fromtimestamp(m.time / 1000)
-    body = " ".join(x for x in (kind(m), clean(m.text)) if x)
+def fmt(m, who, text_limit=4000):
+    t = datetime.fromtimestamp(m.time / 1000, TZ)
+    body = " ".join(x for x in (kind(m), clean(m.text, text_limit)) if x)
     return f"#{m.id} [{t:%Y-%m-%d %H:%M}] {who}: {body}"
 
 
-async def history(c, chat_id, limit):
-    msgs = await c.fetch_history(int(chat_id), backward=limit)
-    msgs = sorted(msgs, key=lambda m: m.time)[-limit:]
+async def pages(c, chat_id, lo=None, hi=None, before_id=0):
+    """Страницы истории от новых к старым (по 100 сообщений, внутри страницы тоже от новых к старым).
+
+    lo / hi — границы по времени (datetime), before_id — идти от сообщения с этим id назад."""
+    cid = int(chat_id)
+    lo_ms, hi_ms = (int(lo.timestamp() * 1000) if lo else None), (int(hi.timestamp() * 1000) if hi else None)
+    t = hi_ms
+    if before_id:
+        m = await c.get_message(cid, before_id)
+        if m:
+            t = m.time if t is None else min(t, m.time)
+    seen = {before_id}
+    while True:
+        page = await c.fetch_history(cid, backward=100, **({"from_time": t} if t else {}))
+        fresh = sorted((m for m in page if m.id not in seen), key=lambda m: m.time, reverse=True)
+        if not fresh:
+            return
+        seen.update(m.id for m in fresh)
+        t = fresh[-1].time
+        yield [m for m in fresh if (hi_ms is None or m.time <= hi_ms) and (lo_ms is None or m.time >= lo_ms)]
+        if (lo_ms and t < lo_ms) or len(page) < 2:
+            return
+
+
+async def history(c, chat_id, limit, date_from="", date_to="", before_id=0, text_limit=1000):
+    """Сообщения с отсечкой по датам и размеру: (строки от старых к новым, подсказка)."""
+    lo, hi = parse_when(date_from, TZ), parse_when(date_to, TZ, end=True)
+    if lo and hi and lo > hi:
+        raise ValueError("date_from позже date_to")
+    limit = max(1, min(limit, HISTORY_MAX))
+    got, size, stopped = [], 0, False
+    async for page in pages(c, chat_id, lo, hi, before_id):
+        for m in page:
+            if got and (len(got) >= limit or size + min(len(m.text or ""), text_limit) + 40 > HISTORY_CHARS):
+                stopped = True
+                break
+            got.append(m)
+            size += min(len(m.text or ""), text_limit) + 40
+        if stopped:
+            break
     me = c.me.contact.id
-    who = await names(c, [m.sender for m in msgs if m.sender != me])
-    return [(m, "я" if m.sender == me else who.get(m.sender, str(m.sender))) for m in msgs]
+    who = await names(c, [m.sender for m in got if m.sender != me])
+    lines = [fmt(m, "я" if m.sender == me else who.get(m.sender, str(m.sender)), text_limit) for m in reversed(got)]
+    hint = ""
+    if stopped:
+        hint = f"… показано {len(got)}, есть более старые. Продолжить: before_id={got[-1].id}" + (f", date_from={date_from}" if date_from else "")
+    return lines, hint
 
 
 def to_attach(data, fname, mime):
@@ -130,18 +179,95 @@ def register(tool, send_guard, mark_sent, Image):
                          for f in fl.folders) or "Папок нет."
 
     @tool()
-    async def max_read_messages(chat: str, limit: int = 30) -> str:
-        """MAX: последние сообщения чата (id из max_list_chats). #N — id сообщения."""
+    async def max_read_messages(chat: str, limit: int = 30, before_id: int = 0, date_from: str = "", date_to: str = "",
+                                text_limit: int = 1000) -> str:
+        """MAX: история чата (id из max_list_chats), старые сверху. #N — id сообщения.
+
+        Любая глубина: limit до 5000. date_from / date_to — период (2025-03, 2025-11-01 14:30, 31.10.2025, 1y, «год назад»):
+        «сообщения за март прошлого года» = date_from=2025-03, date_to=2025-03, limit=5000.
+        Если ответ обрезан, в конце подсказка before_id для продолжения. text_limit — обрезать длинные сообщения."""
         c = await mx()
-        return "\n".join(fmt(m, w) for m, w in await history(c, chat, limit))
+        lines, hint = await history(c, chat, limit, date_from, date_to, before_id, text_limit)
+        if not lines:
+            return "Сообщений за этот период нет."
+        head = f"{len(lines)} сообщений, с {lines[0][lines[0].index('[') + 1:][:16]} по {lines[-1][lines[-1].index('[') + 1:][:16]}"
+        return "\n".join([head, *lines, *([hint] if hint else [])])
 
     @tool()
-    async def max_search_messages(chat: str, query: str, limit: int = 20, depth: int = 300) -> str:
-        """MAX: поиск по тексту среди последних depth сообщений чата."""
+    async def max_messages_around_date(chat: str, when: str, around: int = 10) -> str:
+        """MAX: сообщения вокруг даты — around до и around после (2025-03-14, «год назад», 31.10.2025 18:00)."""
+        c = await mx()
+        t = parse_when(when, TZ)
+        if t is None:
+            raise ValueError("Укажите дату")
+        around = max(1, min(around, 200))
+        msgs = await c.fetch_history(int(chat), from_time=int(t.timestamp() * 1000), backward=around, forward=around)
+        msgs = sorted(msgs, key=lambda m: m.time)
+        me = c.me.contact.id
+        who = await names(c, [m.sender for m in msgs if m.sender != me])
+        return "\n".join(fmt(m, "я" if m.sender == me else who.get(m.sender, str(m.sender)), 600) for m in msgs) or "Рядом с этой датой сообщений нет."
+
+    @tool()
+    async def max_chat_timeline(chat: str, date_from: str = "", date_to: str = "", step: str = "month", scan: int = 20000) -> str:
+        """MAX: активность чата по периодам (step: year, month, week) и самые активные участники.
+
+        MAX не отдаёт счётчики, поэтому сервер просматривает до scan сообщений (по умолчанию 20000, около 10–20 с).
+        Находит, когда шла переписка; потом читайте нужный период через max_read_messages(date_from, date_to)."""
+        c = await mx()
+        lo, hi = parse_when(date_from, TZ), parse_when(date_to, TZ, end=True)
+        key = {"year": "%Y", "week": "%G-W%V"}.get(step, "%Y-%m")
+        per, who, total, last = collections.Counter(), collections.Counter(), 0, None
+        async for page in pages(c, chat, lo, hi):
+            for m in page:
+                per[datetime.fromtimestamp(m.time / 1000, TZ).strftime(key)] += 1
+                who[m.sender] += 1
+                last = m
+            total += len(page)
+            if total >= scan:
+                break
+        if not per:
+            return "Сообщений за этот период нет."
+        top = max(per.values())
+        rows = [f"{k}  {per[k]:>6}  {'█' * max(1, round(24 * per[k] / top))}" for k in sorted(per)]
+        known = await names(c, [u for u, _ in who.most_common(10)])
+        people = ", ".join(f"{known.get(u, u)} {n}" for u, n in who.most_common(8))
+        oldest = f"{datetime.fromtimestamp(last.time / 1000, TZ):%Y-%m-%d}"
+        more = " (дальше есть ещё: увеличьте scan)" if total >= scan else ""
+        return f"Просмотрено {total}, самое раннее: {oldest}{more}\n" + "\n".join(rows) + f"\nАктивнее всех: {people}"
+
+    @tool()
+    async def max_search_messages(chat: str, query: str, limit: int = 20, depth: int = 300, date_from: str = "",
+                                  date_to: str = "", before_id: int = 0) -> str:
+        """MAX: поиск по тексту и именам файлов в чате (MAX не ищет на сервере, поэтому просматриваются сообщения подряд).
+
+        depth — сколько последних сообщений просматривать (до 20000: «найди, что мне писали год назад»);
+        date_from / date_to сужают период и ускоряют поиск. limit до 5000; дальше — подсказка before_id."""
         q = query.lower()
         c = await mx()
-        found = [fmt(m, w) for m, w in await history(c, chat, depth) if q in (m.text or "").lower()]
-        return "\n".join(found[-limit:]) or "Ничего не найдено."
+        lo, hi = parse_when(date_from, TZ), parse_when(date_to, TZ, end=True)
+        scanned = 0
+        limit = max(1, min(limit, HISTORY_MAX))
+        depth = max(1, min(depth, 20000))
+        found, stopped = [], False
+        async for page in pages(c, chat, lo, hi, before_id):
+            for m in page:
+                scanned += 1
+                files = " ".join(getattr(a, "name", "") or "" for a in m.attaches)
+                if q in f"{m.text or ''} {files}".lower():
+                    found.append(m)
+                    if len(found) >= limit:
+                        stopped = True
+                        break
+            if stopped or scanned >= depth:
+                break
+        me = c.me.contact.id
+        who = await names(c, [m.sender for m in found if m.sender != me])
+        lines = [fmt(m, "я" if m.sender == me else who.get(m.sender, str(m.sender)), 600) for m in reversed(found)]
+        if stopped:
+            tail = f"… просмотрено {scanned}, найдено {len(found)}, дальше: before_id={found[-1].id}"
+        else:
+            tail = f"… просмотрено {scanned} сообщений" + (", есть более старые: увеличьте depth" if scanned >= depth else "")
+        return "\n".join([*lines, tail]) if found else f"Ничего не найдено ({tail[2:]})."
 
     @tool()
     async def max_get_media(chat: str, message_id: int):
