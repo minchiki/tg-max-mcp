@@ -160,6 +160,48 @@ async def dialog_context(cid):
     return (await history(c, cid, 8, text_limit=500))[0]
 
 
+async def agent_find(q):
+    """Чаты MAX по части названия: [(id, название)]. Личные диалоги называются по имени собеседника."""
+    c = await mx()
+    chats = await c.fetch_chats()
+    who = await names(c, [next((p for p in ch.participants if p != c.me.contact.id), None) for ch in chats if not ch.title])
+    q = q.casefold()
+    out = []
+    for ch in chats:
+        title = ch.title or who.get(next((p for p in ch.participants if p != c.me.contact.id), None), "")
+        if title and q in title.casefold():
+            out.append((ch.id, name(title)))
+    return out
+
+
+async def agent_history(cid, n):
+    c = await mx()
+    msgs = sorted(await c.fetch_history(int(cid), backward=n), key=lambda m: m.time)[-n:]
+    me = c.me.contact.id
+    who = await names(c, [m.sender for m in msgs if m.sender != me])
+    return [dict(id=m.id, mine=m.sender == me, who="я" if m.sender == me else who.get(m.sender, str(m.sender)),
+                 text=" ".join(x for x in (kind(m), m.text or "") if x), ts=m.time / 1000) for m in msgs]
+
+
+async def agent_send(cid, text, send_guard, mark_sent):
+    err = send_guard("max", cid, text)
+    if err:
+        raise PermissionError(err)
+    c = await mx()
+    m = await c.send_message(int(cid), text)
+    mark_sent("max", cid, m.id, f"agent len={len(text)}")
+    return m.id
+
+
+async def agent_delete(cid, msg_id):
+    c = await mx()
+    await c.delete_message(int(cid), [msg_id], for_me=False)
+
+
+async def agent_typing(cid, seconds):
+    await asyncio.sleep(seconds)  # «печатает…» в MAX из клиента недоступно: просто пауза
+
+
 def to_attach(data, fname, mime):
     if mime.startswith("image/") and not mime.endswith("gif"):
         return Photo(raw=data, name=fname)

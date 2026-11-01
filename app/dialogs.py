@@ -23,11 +23,14 @@ WAIT_CAP = 55
 FILE = os.environ.get("DIALOGS_FILE") or os.path.join(
     os.path.dirname(os.path.abspath(os.path.expanduser(os.environ.get("TG_SESSION", "~/.tg_claude")))), "dialogs.json")
 
+net_sources = []        # функции, возвращающие сети, которые нужно держать подключёнными (агент)
+busy_checks = []        # функции (net, chat) -> bool: чат занят другим режимом (агент)
 feed = deque(maxlen=2000)   # входящие сообщения привязанных чатов
 bindings = {}               # "net:chat" -> привязка
 hooks = {}                  # net -> dict(resolve=..., context=..., ensure=...)
 _seq = 0
 _cond = None
+_ensure_err = {}
 _cond_loop = None
 _keeper = None
 
@@ -104,11 +107,15 @@ async def _keep():
     """Держит подключения к мессенджерам, пока есть привязки: без этого сообщения не придут."""
     while True:
         _expire()
-        for net in {b["net"] for b in bindings.values()}:
+        for net in {b["net"] for b in bindings.values()}.union(*(f() for f in net_sources)):
             try:
                 await hooks[net]["ensure"]()
+                _ensure_err.pop(net, None)
             except Exception as e:
-                print(f"DIALOGS ensure {net}: {type(e).__name__}: {e}", flush=True)
+                msg = f"{type(e).__name__}: {e}"
+                if _ensure_err.get(net) != msg:  # одна и та же ошибка каждые 20 с — только в первый раз
+                    _ensure_err[net] = msg
+                    print(f"DIALOGS ensure {net}: {msg}", flush=True)
         await asyncio.sleep(20)
 
 
@@ -171,6 +178,8 @@ def register(tool, tg_hooks, max_hooks=None):
         Дальше: send_message (написать первым, если нужно) и dialog_wait в цикле. Сам сервер ничего не отправляет."""
         net = _net(network)
         cid, title = await hooks[net]["resolve"](chat)
+        if any(f(net, cid) for f in busy_checks):
+            return "В этом чате работает автономный агент (agent_start): сначала остановите его (agent_stop или «стоп»)."
         _expire()
         bindings[key(net, cid)] = dict(
             net=net, chat=cid, title=name(title), goal=clean(goal, 500), style=clean(style, 200), turns=0,

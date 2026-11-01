@@ -21,6 +21,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from telethon import events, functions, types, utils
 
+import agent
 import dialogs
 import media
 from dates import parse_when
@@ -82,6 +83,7 @@ async def tg():
         if _client is None:
             _client = make_client()
             _client.add_event_handler(_tg_incoming, events.NewMessage(incoming=True))
+            _client.add_event_handler(_tg_outgoing, events.NewMessage(outgoing=True))
         if not _client.is_connected():
             await _client.connect()
             if not await _client.is_user_authorized():
@@ -719,12 +721,26 @@ if max_on:
 
 async def _tg_incoming(event):
     """Входящее сообщение: интересует только привязанный чат (иначе лишний запрос за именем отправителя не нужен)."""
-    if not dialogs.watching("tg", event.chat_id):
+    if not (dialogs.watching("tg", event.chat_id) or agent.active("tg", event.chat_id)):
         return
     m = event.message
     s = await event.get_sender()
-    await dialogs.push("tg", event.chat_id, m.id, m.date.timestamp(), person(s) if s is not None else str(m.sender_id),
-                       " ".join(x for x in (kind(m), m.text or "") if x))
+    who = person(s) if s is not None else str(m.sender_id)
+    text = " ".join(x for x in (kind(m), m.text or "") if x)
+    if dialogs.watching("tg", event.chat_id):
+        await dialogs.push("tg", event.chat_id, m.id, m.date.timestamp(), who, text)
+    await agent.on_incoming("tg", event.chat_id, m.id, m.date.timestamp(), who, text)
+
+
+_tg_me = None
+
+
+async def _tg_outgoing(event):
+    """Сообщения самого владельца: слово «стоп» и команды агенту в «Избранном»."""
+    global _tg_me
+    if _tg_me is None:
+        _tg_me = (await (await tg()).get_me()).id
+    await agent.on_outgoing("tg", event.chat_id, event.message.id, event.message.text or "", saved=event.chat_id == _tg_me)
 
 
 async def _tg_resolve(chat):
@@ -742,10 +758,71 @@ async def _tg_ensure():
     await tg()
 
 
+async def _tg_history(chat_id, n):
+    c = await tg()
+    ent = await c.get_input_entity(chat_id)
+    out = []
+    async for m in c.iter_messages(ent, limit=n):
+        s = m.sender
+        out.append(dict(id=m.id, mine=m.out, who="я" if m.out else (person(s) if s is not None else str(m.sender_id)),
+                        text=" ".join(x for x in (kind(m), m.text or "") if x), ts=m.date.timestamp()))
+    return out[::-1]
+
+
+async def _tg_find(q):
+    c = await tg()
+    q = q.casefold().lstrip("@")
+    found = []
+    async for d in c.iter_dialogs(limit=500):
+        if q and (q in (d.name or "").casefold() or q == (getattr(d.entity, "username", None) or "").casefold()):
+            found.append((d.id, person(d.entity)))
+    return found
+
+
+async def _tg_send(chat_id, text):
+    err = send_guard("tg", chat_id, text)
+    if err:
+        raise PermissionError(err)
+    c = await tg()
+    m = await c.send_message(await c.get_input_entity(chat_id), text)
+    mark_sent("tg", chat_id, m.id, f"agent len={len(text)}")
+    return m.id
+
+
+async def _tg_delete(chat_id, msg_id):
+    c = await tg()
+    await c.delete_messages(await c.get_input_entity(chat_id), [msg_id], revoke=True)
+
+
+async def _tg_typing(chat_id, seconds):
+    c = await tg()
+    async with c.action(await c.get_input_entity(chat_id), "typing"):
+        await asyncio.sleep(seconds)
+
+
+async def _tg_notify(text):
+    """Уведомление владельцу — в «Избранное» (id отправленного запоминаем, чтобы не принять за команду)."""
+    c = await tg()
+    m = await c.send_message("me", text)
+    agent._sent.append(("tg", (await c.get_me()).id, m.id))
+
+
+async def _max_hook(m, client):
+    await dialogs.max_message_hook(m, client)
+    await agent.max_message_hook(m, client)
+
+
 if max_on:
-    max_tools.message_hook = dialogs.max_message_hook
+    max_tools.message_hook = _max_hook
 max_hooks = dict(resolve=max_tools.dialog_resolve, context=max_tools.dialog_context, ensure=max_tools.mx) if max_on else None
 dialogs.register(tool, dict(resolve=_tg_resolve, context=_tg_context, ensure=_tg_ensure), max_hooks)
+
+dialogs.busy_checks.append(agent.active)
+agent_max = dict(resolve=max_tools.dialog_resolve, find=max_tools.agent_find, history=max_tools.agent_history,
+                 send=lambda chat, text: max_tools.agent_send(chat, text, send_guard, mark_sent),
+                 delete=max_tools.agent_delete, typing=max_tools.agent_typing, ensure=max_tools.mx) if max_on else None
+agent.register(tool, dict(resolve=_tg_resolve, find=_tg_find, history=_tg_history, send=_tg_send, delete=_tg_delete,
+                          typing=_tg_typing, ensure=_tg_ensure), agent_max, _tg_notify)
 
 
 class DebugLog:
@@ -785,6 +862,7 @@ class Boot:
             async def recv():
                 m = await receive()
                 if m["type"] == "lifespan.startup":
+                    agent.start()
                     dialogs.start()
                 return m
             return await self.app(scope, recv, send)
