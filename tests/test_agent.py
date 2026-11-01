@@ -508,3 +508,17 @@ def test_gemini_connection_drop_also_falls_back(monkeypatch):
 
     _gemini_world(monkeypatch, handler)
     assert run(agent.decide(T, H, [], False))["action"] == "wait" and models == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+
+
+def test_escalate_may_send_one_honest_message_before_stopping(w):
+    async def go():
+        w.decisions += [dict(action="wait", text="", reason=""),
+                        dict(action="escalate", text="Это ИИ-помощник Магомеда, он ответит сам.", reason="спросили, бот ли это")]
+        await TOOLS["agent_start"]("7", "задача")
+        await settle()
+        await agent.on_incoming("tg", 7, 11, time.time(), "Даниил", "ты бот?")
+        await settle(0.5)
+
+    run(go())
+    assert [s[1] for s in w.sent] == ["Это ИИ-помощник Магомеда, он ответит сам."] and not agent.tasks
+    assert any("нужен ты" in n for n in w.notes)
