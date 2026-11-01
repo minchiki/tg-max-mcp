@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="tg-max-mcp — Telegram и MAX в ChatGPT, Claude и любом MCP-клиенте" width="100%">
+  <img src="assets/banner.png" alt="tg-max-mcp — Telegram и MAX в ChatGPT, Claude и любом MCP-клиенте" width="100%">
 </p>
 
 <p align="center">
