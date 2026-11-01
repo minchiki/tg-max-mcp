@@ -433,7 +433,7 @@ def test_gemini_rate_limit_retries_then_raises(monkeypatch):
     _gemini_world(monkeypatch, handler)
     with pytest.raises(agent.RateLimitError):
         run(agent.decide(T, H, [], False))
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_gemini_bad_key_raises_authentication_error(monkeypatch):
@@ -479,3 +479,18 @@ def test_gemini_start_message_warns_about_privacy(w, monkeypatch):
         return await TOOLS["agent_start"]("7", "задача")
 
     assert "уходят в Google" in run(go())
+
+
+def test_gemini_overloaded_main_model_falls_back_to_lite(monkeypatch):
+    models = []
+
+    def handler(req):
+        model = str(req.url).split("/models/")[1].split(":")[0]
+        models.append(model)
+        if model == "gemini-3.8-flash":
+            return httpx.Response(503, json={"error": {"message": "high demand"}})
+        return _ok('{"action":"reply","text":"ок","reason":""}')
+
+    _gemini_world(monkeypatch, handler)
+    d = run(agent.decide(T, H, [], False))
+    assert d["text"] == "ок" and models[0] == "gemini-3.8-flash" and models[-1] == "gemini-3.5-flash-lite"

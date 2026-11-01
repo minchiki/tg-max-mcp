@@ -30,6 +30,7 @@ LABEL = dialogs.LABEL
 EFFORT = os.environ.get("AGENT_EFFORT", "low")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_DEFAULT = "gemini-3.8-flash"
+GEMINI_FALLBACK = os.environ.get("AGENT_FALLBACK_MODEL", "gemini-3.5-flash-lite")  # если основная перегружена или упёрлась в лимит
 ANTHROPIC_DEFAULT = "claude-opus-5-5"
 DEBOUNCE = float(os.environ.get("AGENT_DEBOUNCE", "5"))        # пауза: люди пишут очередями из нескольких сообщений
 CONTEXT_N = int(os.environ.get("AGENT_CONTEXT", "30"))         # сколько последних сообщений видит модель
@@ -146,6 +147,10 @@ class RateLimitError(Exception):
     pass
 
 
+class ServerBusyError(Exception):
+    """Gemini перегружен (500/503/504): временно, повторяем и переходим на запасную модель."""
+
+
 def _proxy():
     return (os.environ.get("AGENT_PROXY") or os.environ.get("TG_PROXY") or "").strip().replace("socks5h://", "socks5://") or None
 
@@ -218,14 +223,16 @@ def _parse_decision(raw):
     return dict(action=d["action"], text=str(d.get("text") or ""), reason=str(d.get("reason") or ""))
 
 
-async def _gemini_call(http, body):
+async def _gemini_call(http, body, model):
     key = os.environ.get("GEMINI_API_KEY", "").strip()
-    r = await http.post(f"{GEMINI_URL}/models/{model_name()}:generateContent", json=body,
+    r = await http.post(f"{GEMINI_URL}/models/{model}:generateContent", json=body,
                         headers={"x-goog-api-key": key, "content-type": "application/json"})
     if r.status_code in (401, 403) or (r.status_code == 400 and "API key" in r.text):
         raise AuthenticationError(f"Gemini: ключ не принят или недоступен ({r.status_code})")
     if r.status_code == 429:
         raise RateLimitError("Gemini: лимит бесплатного тарифа")
+    if r.status_code in (500, 503, 504):
+        raise ServerBusyError(f"Gemini перегружен ({r.status_code})")
     return r
 
 
@@ -236,14 +243,18 @@ async def _decide_gemini(prompt):
     level = os.environ.get("AGENT_THINKING", "low").strip()
     if level and level != "off":
         body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": level}
+    model = model_name()
     async with _http() as http:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
-                r = await _gemini_call(http, body)
-            except RateLimitError:
-                if attempt == 2:
+                r = await _gemini_call(http, body, model)
+            except (RateLimitError, ServerBusyError):
+                if attempt == 3:
                     raise
-                await asyncio.sleep(8 * (attempt + 1))  # бесплатный тариф: несколько запросов в минуту
+                if attempt >= 1 and model != GEMINI_FALLBACK and not os.environ.get("AGENT_NO_FALLBACK"):
+                    _log(f"gemini {model} unavailable, switching to {GEMINI_FALLBACK}")
+                    model = GEMINI_FALLBACK
+                await asyncio.sleep(4 * (attempt + 1))  # бесплатный тариф: несколько запросов в минуту
                 continue
             if r.status_code == 400 and "thinkingConfig" in body["generationConfig"]:
                 del body["generationConfig"]["thinkingConfig"]  # эта модель не знает уровень размышлений — без него
@@ -260,8 +271,8 @@ async def _decide_gemini(prompt):
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
             try:
                 return _parse_decision(text)
-            except ValueError:  # JSONDecodeError тоже ValueError: просим ещё раз, один раз
-                if attempt == 2:
+            except ValueError:  # JSONDecodeError тоже ValueError: просим ещё раз
+                if attempt >= 2:
                     raise
                 body["contents"].append({"role": "model", "parts": [{"text": text or "…"}]})
                 body["contents"].append({"role": "user", "parts": [{"text": "Это не JSON по формату. Верни только JSON-объект."}]})
