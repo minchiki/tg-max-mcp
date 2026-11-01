@@ -3,6 +3,7 @@
 Запуск — только по команде владельца:
   • инструмент agent_start (из ChatGPT / Claude), либо
   • сообщение самому себе в «Избранное»:  «агент Даниил: договорись о встрече завтра, коротко и на ты»
+Мозг агента — Gemini (бесплатный ключ GEMINI_API_KEY) или Claude (ANTHROPIC_API_KEY), см. brain().
 Остановка — слово «стоп» (в чате с собеседником или в «Избранном»), agent_stop, лимит ответов, срок,
 или решение самого агента (цель достигнута / нужен владелец).
 
@@ -26,8 +27,10 @@ from safety import clean, name
 
 NETS = dialogs.NETS
 LABEL = dialogs.LABEL
-MODEL = os.environ.get("AGENT_MODEL", "claude-opus-5-5")
 EFFORT = os.environ.get("AGENT_EFFORT", "low")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_DEFAULT = "gemini-3.8-flash"
+ANTHROPIC_DEFAULT = "claude-opus-5-5"
 DEBOUNCE = float(os.environ.get("AGENT_DEBOUNCE", "5"))        # пауза: люди пишут очередями из нескольких сообщений
 CONTEXT_N = int(os.environ.get("AGENT_CONTEXT", "30"))         # сколько последних сообщений видит модель
 REPLIES_DEFAULT = int(os.environ.get("AGENT_MAX_REPLIES", "20"))
@@ -119,8 +122,37 @@ async def _notify(text):
 
 # ---------- модель ----------
 
+def brain():
+    """Какая модель отвечает: AGENT_BRAIN=gemini|anthropic, иначе по тому, какой ключ задан (Gemini в приоритете)."""
+    b = os.environ.get("AGENT_BRAIN", "").strip().lower()
+    if b in ("gemini", "anthropic"):
+        return b
+    return "gemini" if os.environ.get("GEMINI_API_KEY", "").strip() else "anthropic"
+
+
+def model_name():
+    return os.environ.get("AGENT_MODEL", "").strip() or (GEMINI_DEFAULT if brain() == "gemini" else ANTHROPIC_DEFAULT)
+
+
 def api_key_missing():
-    return not os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    return not os.environ.get("GEMINI_API_KEY" if brain() == "gemini" else "ANTHROPIC_API_KEY", "").strip()
+
+
+class AuthenticationError(Exception):
+    """Ключ не принят (имя класса важно: по нему _step останавливает агента)."""
+
+
+class RateLimitError(Exception):
+    pass
+
+
+def _proxy():
+    return (os.environ.get("AGENT_PROXY") or os.environ.get("TG_PROXY") or "").strip().replace("socks5h://", "socks5://") or None
+
+
+def _http():
+    import httpx
+    return httpx.AsyncClient(proxy=_proxy(), timeout=60)
 
 
 def _client():
@@ -128,7 +160,7 @@ def _client():
     if _cli is None:
         import anthropic
         from anthropic import DefaultAsyncHttpxClient
-        proxy = (os.environ.get("AGENT_PROXY") or os.environ.get("TG_PROXY") or "").strip().replace("socks5h://", "socks5://")
+        proxy = _proxy()
         _cli = anthropic.AsyncAnthropic(http_client=DefaultAsyncHttpxClient(proxy=proxy) if proxy else None,
                                         max_retries=2, timeout=90)
     return _cli
@@ -143,8 +175,7 @@ def _transcript(history):
     return "\n".join(lines) or "(переписки ещё нет)"
 
 
-async def decide(t, history, new, kickoff):
-    """Решение модели: dict(action, text, reason). Вынесено отдельно, чтобы подменять в тестах."""
+def _prompt(t, history, new, kickoff):
     fresh = "\n".join(f"{e['who']}: {clean(e['text'], 800)}" for e in new) or "(новых сообщений нет)"
     prompt = (f"Сейчас: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
               f"Задача владельца: {t['task']}\n" + (f"Стиль: {t['style']}\n" if t.get("style") else "")
@@ -152,8 +183,16 @@ async def decide(t, history, new, kickoff):
               + (f"Ответов отправлено: {t['replies']} из {t['max_replies']}\n" if t["replies"] else "")
               + f"\n<chat>\n{_transcript(history)}\n</chat>\n\n"
               + ("Задача только что поставлена." if kickoff else f"Новые сообщения собеседника:\n<chat>\n{fresh}\n</chat>"))
+    return prompt
+
+
+async def decide(t, history, new, kickoff):
+    """Решение модели: dict(action, text, reason). Вынесено отдельно, чтобы подменять в тестах."""
+    prompt = _prompt(t, history, new, kickoff)
+    if brain() == "gemini":
+        return await _decide_gemini(prompt)
     resp = await _client().messages.create(
-        model=MODEL, max_tokens=2000, system=SYSTEM, messages=[{"role": "user", "content": prompt}],
+        model=model_name(), max_tokens=2000, system=SYSTEM, messages=[{"role": "user", "content": prompt}],
         output_config={"effort": EFFORT, "format": {"type": "json_schema", "schema": SCHEMA}})
     usage = getattr(resp, "usage", None)
     if usage is not None:
@@ -162,6 +201,71 @@ async def decide(t, history, new, kickoff):
         return dict(action="escalate", text="", reason="модель отказалась отвечать на этот диалог")
     text = next((b.text for b in resp.content if b.type == "text"), "")
     return json.loads(text)
+
+
+JSON_HINT = ('\n\nОтветь только JSON-объектом без пояснений и без markdown: '
+             '{"action": "reply" | "wait" | "done" | "escalate", "text": "...", "reason": "..."}')
+
+
+def _parse_decision(raw):
+    """JSON решения из текста модели (допускаем обёртку в ```), с проверкой полей."""
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").removeprefix("json").strip()
+    d = json.loads(raw)
+    if not isinstance(d, dict) or d.get("action") not in ("reply", "wait", "done", "escalate"):
+        raise ValueError("в ответе модели нет action")
+    return dict(action=d["action"], text=str(d.get("text") or ""), reason=str(d.get("reason") or ""))
+
+
+async def _gemini_call(http, body):
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    r = await http.post(f"{GEMINI_URL}/models/{model_name()}:generateContent", json=body,
+                        headers={"x-goog-api-key": key, "content-type": "application/json"})
+    if r.status_code in (401, 403) or (r.status_code == 400 and "API key" in r.text):
+        raise AuthenticationError(f"Gemini: ключ не принят или недоступен ({r.status_code})")
+    if r.status_code == 429:
+        raise RateLimitError("Gemini: лимит бесплатного тарифа")
+    return r
+
+
+async def _decide_gemini(prompt):
+    body = {"systemInstruction": {"parts": [{"text": SYSTEM}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt + JSON_HINT}]}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7, "maxOutputTokens": 2000}}
+    level = os.environ.get("AGENT_THINKING", "low").strip()
+    if level and level != "off":
+        body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": level}
+    async with _http() as http:
+        for attempt in range(3):
+            try:
+                r = await _gemini_call(http, body)
+            except RateLimitError:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(8 * (attempt + 1))  # бесплатный тариф: несколько запросов в минуту
+                continue
+            if r.status_code == 400 and "thinkingConfig" in body["generationConfig"]:
+                del body["generationConfig"]["thinkingConfig"]  # эта модель не знает уровень размышлений — без него
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f"Gemini HTTP {r.status_code}")
+            data = r.json()
+            usage = data.get("usageMetadata") or {}
+            _log(f"usage in={usage.get('promptTokenCount')} out={usage.get('candidatesTokenCount')}")
+            cands = data.get("candidates") or []
+            if not cands or (data.get("promptFeedback") or {}).get("blockReason") or cands[0].get("finishReason") in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"):
+                return dict(action="escalate", text="", reason="Gemini отказался отвечать в этом диалоге (фильтр безопасности)")
+            parts = (cands[0].get("content") or {}).get("parts") or []
+            text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+            try:
+                return _parse_decision(text)
+            except ValueError:  # JSONDecodeError тоже ValueError: просим ещё раз, один раз
+                if attempt == 2:
+                    raise
+                body["contents"].append({"role": "model", "parts": [{"text": text or "…"}]})
+                body["contents"].append({"role": "user", "parts": [{"text": "Это не JSON по формату. Верни только JSON-объект."}]})
+    raise RuntimeError("Gemini: нет ответа")
 
 
 # ---------- ход агента ----------
@@ -286,7 +390,8 @@ async def on_incoming(net, chat, msg_id, ts, who, text):
 async def start_task(net, chat, title, task, style="", max_replies=None, ttl_hours=None):
     k = key(net, chat)
     if api_key_missing():
-        return "Ключ API не задан на сервере: добавьте ANTHROPIC_API_KEY в окружение (см. README), агент без него не работает."
+        return ("Ключ модели не задан на сервере: добавьте GEMINI_API_KEY (бесплатный, aistudio.google.com) или ANTHROPIC_API_KEY "
+                "в /etc/tg-mcp/env (см. README), без него агент не работает.")
     if dialogs.watching(net, chat):
         return "Этот чат привязан к диалогу с ассистентом (dialog_bind): сначала dialog_unbind."
     if k in tasks:
@@ -299,8 +404,10 @@ async def start_task(net, chat, title, task, style="", max_replies=None, ttl_hou
     await hooks[net]["ensure"]()
     _spawn(k)
     t = tasks[k]
+    privacy = (" Тексты чата уходят в Google; на бесплатном тарифе Google может использовать их для улучшения моделей."
+               if brain() == "gemini" else "")
     return (f"Агент запущен: «{t['title']}» ({LABEL[net]}). Задача: {t['task']}. Лимит {t['max_replies']} ответов, "
-            f"{int((t['expires'] - now) // 3600)} ч. Остановить: напишите «стоп» (в этом чате или в Избранном).")
+            f"{int((t['expires'] - now) // 3600)} ч. Остановить: напишите «стоп» (в этом чате или в Избранном)." + privacy)
 
 
 def status():
@@ -438,7 +545,7 @@ def register(tool, tg_hooks, max_hooks, notify):
         вечером»); style — тон («коротко, на ты»). Агент останавливается словом «стоп» от владельца (в этом чате
         или в «Избранном»), по agent_stop, при лимите max_replies (до 100) или сроке ttl_hours (до 72), а также
         сам: когда цель достигнута или нужен владелец (тогда пишет об этом в «Избранное»).
-        Нужен ключ ANTHROPIC_API_KEY на сервере."""
+        Нужен ключ модели на сервере: GEMINI_API_KEY (бесплатный) или ANTHROPIC_API_KEY."""
         net = _net(network)
         cid, title = await hooks[net]["resolve"](chat)
         return await start_task(net, cid, title, task, style, max_replies, ttl_hours)

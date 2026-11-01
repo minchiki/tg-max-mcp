@@ -356,3 +356,126 @@ def test_messages_older_than_the_task_are_ignored(w):
 
     run(go())
     assert len(w.calls) == 1  # только стартовый ход
+
+
+# ---------- Gemini ----------
+
+import httpx  # noqa: E402
+
+
+def _gemini_world(monkeypatch, handler):
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-key")
+    monkeypatch.delenv("AGENT_BRAIN", raising=False)
+    monkeypatch.setattr(agent, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(agent.asyncio, "sleep", lambda s: real_sleep(0))
+
+
+def _ok(text, **extra):
+    return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP", **extra}],
+                                     "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}})
+
+
+T = dict(task="встреча", style="", title="Даниил", net="tg", replies=0, max_replies=5)
+H = [dict(id=1, mine=False, who="Даниил", text="привет", ts=time.time())]
+
+
+def test_gemini_is_chosen_by_key_and_request_is_well_formed(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["url"], seen["key"], seen["body"] = str(req.url), req.headers.get("x-goog-api-key"), req.read().decode()
+        return _ok('{"action": "reply", "text": "Привет, давай в 6?", "reason": ""}')
+
+    _gemini_world(monkeypatch, handler)
+    assert agent.brain() == "gemini"
+    d = run(agent.decide(T, H, [dict(who="Даниил", text="привет", id=1, ts=0)], False))
+    assert d == dict(action="reply", text="Привет, давай в 6?", reason="")
+    assert "gemini-3.8-flash:generateContent" in seen["url"] and "AIza" not in seen["url"] and seen["key"] == "AIza-test-key"
+    assert "responseMimeType" in seen["body"] and "<chat>" in seen["body"] and "встреча" in seen["body"]
+
+
+def test_gemini_accepts_fenced_json_and_skips_thought_parts(monkeypatch):
+    def handler(req):
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [
+            {"text": "думаю...", "thought": True}, {"text": '```json\n{"action":"wait","text":"","reason":"ок"}\n```'}]}}]})
+
+    _gemini_world(monkeypatch, handler)
+    assert run(agent.decide(T, H, [], False))["action"] == "wait"
+
+
+def test_gemini_retries_bad_json_once_then_works(monkeypatch):
+    replies = iter(["вот ответ без json", '{"action":"done","text":"Спасибо","reason":"готово"}'])
+    _gemini_world(monkeypatch, lambda req: _ok(next(replies)))
+    assert run(agent.decide(T, H, [], False))["action"] == "done"
+
+
+def test_gemini_drops_thinking_config_on_400(monkeypatch):
+    bodies = []
+
+    def handler(req):
+        bodies.append(req.read().decode())
+        if "thinkingConfig" in bodies[-1]:
+            return httpx.Response(400, json={"error": {"message": "Unknown field thinkingConfig"}})
+        return _ok('{"action":"wait","text":"","reason":""}')
+
+    _gemini_world(monkeypatch, handler)
+    assert run(agent.decide(T, H, [], False))["action"] == "wait" and len(bodies) == 2
+
+
+def test_gemini_rate_limit_retries_then_raises(monkeypatch):
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        return httpx.Response(429, json={"error": {"status": "RESOURCE_EXHAUSTED"}})
+
+    _gemini_world(monkeypatch, handler)
+    with pytest.raises(agent.RateLimitError):
+        run(agent.decide(T, H, [], False))
+    assert len(calls) == 3
+
+
+def test_gemini_bad_key_raises_authentication_error(monkeypatch):
+    _gemini_world(monkeypatch, lambda req: httpx.Response(400, json={"error": {"message": "API key not valid. Please pass a valid API key."}}))
+    with pytest.raises(agent.AuthenticationError):
+        run(agent.decide(T, H, [], False))
+
+
+def test_gemini_safety_block_escalates(monkeypatch):
+    _gemini_world(monkeypatch, lambda req: httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}}))
+    d = run(agent.decide(T, H, [], False))
+    assert d["action"] == "escalate" and "Gemini" in d["reason"]
+
+
+def test_auth_error_from_brain_stops_agent_with_clear_message(w, monkeypatch):
+    async def bad(t, history, new, kickoff):
+        raise agent.AuthenticationError("ключ")
+
+    monkeypatch.setattr(agent, "decide", bad)
+
+    async def go():
+        await TOOLS["agent_start"]("7", "задача")
+        await settle()
+
+    run(go())
+    assert not agent.tasks and any("ключ не принят" in n for n in w.notes)
+
+
+def test_brain_selection_and_missing_key(monkeypatch):
+    for k in ("GEMINI_API_KEY", "AGENT_BRAIN", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    assert agent.brain() == "anthropic" and agent.api_key_missing()
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    assert agent.brain() == "gemini" and not agent.api_key_missing() and agent.model_name() == "gemini-3.8-flash"
+    monkeypatch.setenv("AGENT_BRAIN", "anthropic")
+    assert agent.brain() == "anthropic" and agent.api_key_missing() and agent.model_name() == "claude-opus-5-5"
+
+
+def test_gemini_start_message_warns_about_privacy(w, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+
+    async def go():
+        return await TOOLS["agent_start"]("7", "задача")
+
+    assert "уходят в Google" in run(go())
