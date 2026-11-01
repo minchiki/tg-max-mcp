@@ -7,6 +7,7 @@
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3fb4f0">
   <img alt="MCP 2026-07-28" src="https://img.shields.io/badge/MCP-2026--07--28-8b5cf6">
   <a href="https://github.com/minchiki/tg-max-mcp/actions/workflows/check.yml"><img alt="check" src="https://github.com/minchiki/tg-max-mcp/actions/workflows/check.yml/badge.svg"></a>
+  <a href="https://t.me/huicoding"><img alt="Telegram: HUICODING" src="https://img.shields.io/badge/Telegram-HUICODING-26a5e4?logo=telegram&logoColor=white"></a>
 </p>
 
 **tg-max-mcp** — MCP-сервер, который даёт ChatGPT, Claude, Cursor и другим ассистентам доступ к **вашему личному аккаунту Telegram и MAX**. Пишете ассистенту «что мне писал Даниил в MAX?» или «сделай в группе опрос на завтра» — он читает и отправляет от вашего имени.
@@ -170,6 +171,10 @@ claude mcp add telegram -e TG_API_ID=... -e TG_API_HASH=... -- python /путь/
 - [Telethon](https://github.com/LonamiWebs/Telethon) (MIT) и [PyMax](https://github.com/MaxApiTeam/PyMax) (MIT) — клиенты Telegram и MAX.
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (MIT).
 - Набор инструментов Telegram сверялся с [chigwell/telegram-mcp](https://github.com/chigwell/telegram-mcp) — если вам нужен только Telegram на своём компьютере и больше функций (несколько аккаунтов, ленты событий), посмотрите его.
+
+## Автор
+
+Новости, обновления и другие проекты — в Telegram-канале **[HUICODING](https://t.me/huicoding)**.
 
 ## Лицензия
 
