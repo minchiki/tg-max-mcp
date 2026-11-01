@@ -21,6 +21,12 @@ HISTORY_CHARS = 80000   # символов в ответе: больше ChatGPT
 
 _client = None
 _lock = asyncio.Lock()
+message_hook = None  # async (message, client): сюда приходят все входящие сообщения (для диалогов)
+
+
+async def _on_message(m, *_):
+    if message_hook is not None and _client is not None:
+        await message_hook(m, _client)
 
 
 async def mx():
@@ -36,6 +42,7 @@ async def mx():
                 except Exception:
                     pass
             _client = make_client()
+            _client.on_message()(_on_message)
             await _client.connect()
             if _client.me is None:
                 raise RuntimeError("Не удалось войти в MAX: выполните max_login.sh заново")
@@ -134,6 +141,23 @@ async def history(c, chat_id, limit, date_from="", date_to="", before_id=0, text
     if stopped:
         hint = f"… показано {len(got)}, есть более старые. Продолжить: before_id={got[-1].id}" + (f", date_from={date_from}" if date_from else "")
     return lines, hint
+
+
+async def dialog_resolve(chat):
+    """(id чата, название) для привязки диалога."""
+    c = await mx()
+    cid = int(str(chat).strip())
+    ch = await c.get_chat(cid)
+    title = ch.title
+    if not title:
+        peer_id = next((p for p in ch.participants if p != c.me.contact.id), None)
+        title = (await names(c, [peer_id])).get(peer_id, str(cid)) if peer_id else str(cid)
+    return cid, title
+
+
+async def dialog_context(cid):
+    c = await mx()
+    return (await history(c, cid, 8, text_limit=500))[0]
 
 
 def to_attach(data, fname, mime):

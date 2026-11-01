@@ -19,8 +19,9 @@ from zoneinfo import ZoneInfo
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from telethon import functions, types
+from telethon import events, functions, types, utils
 
+import dialogs
 import media
 from dates import parse_when
 from safety import INSTRUCTIONS, clean, name
@@ -80,6 +81,7 @@ async def tg():
     async with _client_lock:
         if _client is None:
             _client = make_client()
+            _client.add_event_handler(_tg_incoming, events.NewMessage(incoming=True))
         if not _client.is_connected():
             await _client.connect()
             if not await _client.is_user_authorized():
@@ -708,8 +710,42 @@ try:  # MAX необязателен: без pymax сервер работает
     import max_tools
 except ImportError:
     max_tools = None
-if max_tools and os.environ.get("MAX_ENABLED", "1") != "0":
+max_on = bool(max_tools and os.environ.get("MAX_ENABLED", "1") != "0")
+if max_on:
     max_tools.register(tool, send_guard, mark_sent, Image)
+
+
+# ---------- диалоги: привязка чата к цели, ожидание ответа ----------
+
+async def _tg_incoming(event):
+    """Входящее сообщение: интересует только привязанный чат (иначе лишний запрос за именем отправителя не нужен)."""
+    if not dialogs.watching("tg", event.chat_id):
+        return
+    m = event.message
+    s = await event.get_sender()
+    await dialogs.push("tg", event.chat_id, m.id, m.date.timestamp(), person(s) if s is not None else str(m.sender_id),
+                       " ".join(x for x in (kind(m), m.text or "") if x))
+
+
+async def _tg_resolve(chat):
+    c, ent = await peer(chat)
+    return utils.get_peer_id(ent), person(await c.get_entity(ent))
+
+
+async def _tg_context(chat_id):
+    c = await tg()
+    ent = await c.get_input_entity(chat_id)
+    return [fmt(m, 500) async for m in c.iter_messages(ent, limit=8)][::-1]
+
+
+async def _tg_ensure():
+    await tg()
+
+
+if max_on:
+    max_tools.message_hook = dialogs.max_message_hook
+max_hooks = dict(resolve=max_tools.dialog_resolve, context=max_tools.dialog_context, ensure=max_tools.mx) if max_on else None
+dialogs.register(tool, dict(resolve=_tg_resolve, context=_tg_context, ensure=_tg_ensure), max_hooks)
 
 
 class DebugLog:
@@ -738,6 +774,23 @@ class DebugLog:
         await self.app(scope, receive, snd)
 
 
+class Boot:
+    """При запуске поднимает сохранённые привязки диалогов и держит подключения к мессенджерам."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            async def recv():
+                m = await receive()
+                if m["type"] == "lifespan.startup":
+                    dialogs.start()
+                return m
+            return await self.app(scope, recv, send)
+        return await self.app(scope, receive, send)
+
+
 if __name__ == "__main__":
     if STDIO:
         mcp.run("stdio")
@@ -745,4 +798,4 @@ if __name__ == "__main__":
         import uvicorn
         app = mcp.streamable_http_app(host=HOST, **HTTP_OPTS)
         # access_log выключен: в пути лежит секрет (/<TG_SECRET>/mcp)
-        uvicorn.run(DebugLog(app) if os.environ.get("TG_DEBUG") else app, host=HOST, port=PORT, access_log=False)
+        uvicorn.run(Boot(DebugLog(app) if os.environ.get("TG_DEBUG") else app), host=HOST, port=PORT, access_log=False)
