@@ -27,6 +27,10 @@ def parse_when(s, tz, end=False):
     now = datetime.now(tz)
     if low in ("сейчас", "now", "сегодня", "today"):
         return now if low in ("сейчас", "now") or end else now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if low in ("завтра", "tomorrow"):
+        return now + timedelta(days=1)
+    if low in ("послезавтра",):
+        return now + timedelta(days=2)
     if low in _WORDS:
         return now - _WORDS[low]
     m = _REL.match(low)

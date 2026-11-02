@@ -25,7 +25,7 @@ jobs:
           import server
           tools = asyncio.run(server.mcp.list_tools())
           print(len(tools), "tools")
-          assert len(tools) >= 72
+          assert len(tools) >= 84
           EOF
       - name: shell syntax
         run: for f in deploy/*.sh; do bash -n "$f"; done

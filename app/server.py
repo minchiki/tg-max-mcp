@@ -24,6 +24,7 @@ from telethon import events, functions, types, utils
 import agent
 import dialogs
 import media
+import mes
 from dates import parse_when
 from safety import INSTRUCTIONS, clean, name
 from tgcfg import make_client
@@ -823,6 +824,9 @@ agent_max = dict(resolve=max_tools.dialog_resolve, find=max_tools.agent_find, hi
                  delete=max_tools.agent_delete, typing=max_tools.agent_typing, ensure=max_tools.mx) if max_on else None
 agent.register(tool, dict(resolve=_tg_resolve, find=_tg_find, history=_tg_history, send=_tg_send, delete=_tg_delete,
                           typing=_tg_typing, ensure=_tg_ensure), agent_max, _tg_notify)
+
+if os.environ.get("MES_ENABLED", "1") != "0":
+    mes.register(tool)  # школьный дневник МЭШ: нужен вход deploy/mes_login.sh
 
 
 class DebugLog:
