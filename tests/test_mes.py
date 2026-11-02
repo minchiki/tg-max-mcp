@@ -209,3 +209,20 @@ def test_login_good_tokens_are_saved_and_verified(net):
     import mes_login
     p = run(mes_login.finish("access-1", "refresh-1"))
     assert p["name"] == "Петров Иван" and json.load(open(mes.FILE))["access"] == "access-1"
+
+
+def test_file_links_and_download_guard():
+    hw = {"materials": [{"title": "фото.jpg", "urls": [{"url": "https://school.mos.ru/ej/attachments/files/1/original/a.jpg", "type": "file_link"}]},
+                        {"title": "ссылка", "urls": [{"url": "http://evil/x", "type": "file_link"}]}],
+          "attachments": []}
+    assert mes.file_links(hw) == [("фото.jpg", "https://school.mos.ru/ej/attachments/files/1/original/a.jpg")]
+    assert not mes._file_host_ok("https://evil.example/a.jpg") and not mes._file_host_ok("http://school.mos.ru/a.jpg")
+    assert mes._file_host_ok("https://school.mos.ru/ej/a.jpg") and mes._file_host_ok("https://cdn.mos.ru/a.jpg")
+
+
+def test_meals_without_contract_explain_how_to_get_it_and_accept_manual_id(net, monkeypatch):
+    monkeypatch.delenv("MES_CONTRACT_ID", raising=False)
+    run(mes.me())
+    mes._profile["contract_id"] = None
+    with pytest.raises(mes.MesError, match="contract_id"):
+        run(TOOLS["mes_meals"]())

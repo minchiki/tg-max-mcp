@@ -829,7 +829,7 @@ agent.register(tool, dict(resolve=_tg_resolve, find=_tg_find, history=_tg_histor
                           typing=_tg_typing, ensure=_tg_ensure), agent_max, _tg_notify)
 
 if os.environ.get("MES_ENABLED", "1") != "0":
-    mes.register(tool)  # школьный дневник МЭШ: нужен вход deploy/mes_login.sh
+    mes.register(tool, Image)  # школьный дневник МЭШ: нужен вход deploy/mes_login.sh
 
 
 class DebugLog:

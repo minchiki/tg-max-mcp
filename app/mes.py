@@ -27,6 +27,9 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 CACHE_TTL = 45          # секунд: одинаковые запросы подряд не бьют в МЭШ
 RAW_LIMIT = 20000       # символов в ответе mes_raw
 
+FILE_LIMIT = 10 * 1024 * 1024   # байт: больше файл не скачиваем
+IMAGE_TYPES = {"image/jpeg": "jpeg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}
+
 state = {}              # access, refresh, saved_at
 _mtime = 0.0
 _cache = {}
@@ -182,6 +185,49 @@ async def get(path, params=None, *, mobile=False, profile_id=None, role=None, ho
     return data
 
 
+def _file_host_ok(url):
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    return u.scheme == "https" and bool(u.hostname) and (u.hostname in HOSTS or u.hostname.endswith(".mos.ru"))
+
+
+async def download(url):
+    """Скачать файл МЭШ (только https и *.mos.ru). Возвращает (байты, тип). Вход передаётся только на school/dnevnik/uchebnik.mos.ru."""
+    from urllib.parse import urljoin, urlparse
+    if not logged_in():
+        raise MesAuthError("вход в МЭШ не выполнен: выполните deploy/mes_login.sh на сервере")
+    for attempt in range(2):
+        access = state["access"]
+        cur = url
+        expired = False
+        async with _http() as h:
+            for _ in range(4):
+                if not _file_host_ok(cur):
+                    raise MesError("адрес файла вне mos.ru: не скачиваю")
+                auth = urlparse(cur).hostname in HOSTS
+                async with h.stream("GET", cur, headers=_headers(access) if auth else {}) as r:
+                    if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
+                        cur = urljoin(cur, r.headers["location"])
+                        continue
+                    if r.status_code == 401 and attempt == 0 and auth:
+                        expired = True
+                        break
+                    if r.status_code >= 400:
+                        raise MesError(f"файл недоступен: МЭШ ответил {r.status_code}")
+                    buf = bytearray()
+                    async for chunk in r.aiter_bytes():
+                        buf += chunk
+                        if len(buf) > FILE_LIMIT:
+                            raise MesError(f"файл больше {FILE_LIMIT // 1048576} МБ: не скачиваю")
+                    ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+                    return bytes(buf), ctype
+            else:
+                raise MesError("слишком много перенаправлений")
+        if expired:
+            await _refresh(access)
+    raise MesAuthError("МЭШ не принимает токен: войдите заново (deploy/mes_login.sh)")
+
+
 def _find(obj, *keys):
     """Первое значение по любому из ключей в произвольно вложенном JSON."""
     if isinstance(obj, dict):
@@ -242,6 +288,25 @@ def _mark(m):
         (f" · «{clean(m.get('comment'), 120)}»" if m.get("comment") else "")
 
 
+def file_links(h):
+    """Файлы, прикреплённые к ДЗ: [(название, адрес)] из материалов МЭШ и вложений."""
+    out = []
+    for m in (h.get("materials") or []) + (h.get("attachments") or []):
+        if not isinstance(m, dict):
+            continue
+        for u in m.get("urls") or []:
+            if isinstance(u, dict) and str(u.get("url", "")).startswith("https://") and u.get("type") in (None, "file_link", "file"):
+                out.append((clean(m.get("title") or m.get("file_name") or "файл", 80), u["url"]))
+        if m.get("url") and str(m["url"]).startswith("https://"):
+            out.append((clean(m.get("title") or m.get("file_name") or "файл", 80), m["url"]))
+    seen, res = set(), []
+    for t, u in out:
+        if u not in seen:
+            seen.add(u)
+            res.append((t, u))
+    return res
+
+
 def fmt_homework(items, only_undone=False):
     out = []
     for h in sorted(items, key=lambda x: (x.get("date") or "", x.get("subject_name") or "")):
@@ -252,8 +317,9 @@ def fmt_homework(items, only_undone=False):
         extra = []
         if mats:
             extra.append(f"материалов МЭШ: {len(mats)}")
-        if h.get("attachments"):
-            extra.append(f"файлов: {len(h['attachments'])}")
+        links = file_links(h)
+        if h.get("attachments") or links:
+            extra.append(f"файлов: {len(h.get('attachments') or []) or len(links)}" + (" (mes_homework_files / mes_file)" if links else ""))
         if h.get("written_answer"):
             extra.append("ответ записан")
         out.append(f"[{'x' if h.get('is_done') else ' '}] {h.get('date', '?')} · {clean(h.get('subject_name'), 60)}"
@@ -312,7 +378,7 @@ def fmt_events(events):
 
 # ---------- инструменты ----------
 
-def register(tool):
+def register(tool, Image=None):
     async def student():
         p = await me()
         if not p.get("student_id"):
@@ -367,6 +433,62 @@ def register(tool):
         items = data.get("payload") if isinstance(data, dict) else data
         return fmt_homework(items or [], only_undone) or "Домашних заданий нет."
 
+    async def hw_items(date_from, date_to):
+        p = await student()
+        a = _day(date_from)
+        b = _day(date_to, a + timedelta(days=7))
+        data = await get("family/web/v1/homeworks", {"from": a.isoformat(), "to": b.isoformat(), "student_id": p["student_id"]},
+                         profile_id=p["profile_id"])
+        items = (data.get("payload") if isinstance(data, dict) else data) or []
+        return sorted(items, key=lambda x: (x.get("date") or "", x.get("subject_name") or ""))
+
+    @tool()
+    async def mes_homework_files(date_from: str = "", date_to: str = "") -> str:
+        """МЭШ: файлы и фото, прикреплённые к домашним заданиям (по умолчанию от сегодня на 7 дней): дата, предмет, название, адрес.
+
+        Адрес передайте в mes_file, чтобы увидеть фото; mes_homework_photos покажет сразу все."""
+        out = []
+        for h in await hw_items(date_from, date_to):
+            for title, url in file_links(h):
+                out.append(f"{h.get('date', '?')} · {clean(h.get('subject_name'), 60)} (ДЗ {h.get('homework_entry_id')}): {title} — {url}")
+        return "\n".join(out) or "Файлов в домашних заданиях за этот период нет."
+
+    @tool()
+    async def mes_file(url: str):
+        """МЭШ: скачать файл по адресу из mes_homework_files / mes_lesson (только https и mos.ru). Фото возвращается картинкой;
+        для остальных файлов (pdf, документы) вернётся тип и размер. Не больше 10 МБ."""
+        data, ctype = await download(url)
+        name_ = clean(url.rsplit("/", 1)[-1], 80)
+        if ctype in IMAGE_TYPES and Image is not None:
+            return [f"Файл {name_}, {len(data) // 1024} КБ", Image(data=data, format=IMAGE_TYPES[ctype])]
+        return f"Файл {name_}: тип {ctype or '?'}, {len(data) // 1024} КБ. Показать можно только картинки (jpeg, png, webp, gif)."
+
+    @tool()
+    async def mes_homework_photos(date_from: str = "", date_to: str = "", subject: str = "", limit: int = 5):
+        """МЭШ: сразу показать фото из домашних заданий (по умолчанию от сегодня на 7 дней). subject — часть названия предмета,
+        limit — сколько фото максимум (до 8). Фото в ДЗ часто и есть само задание: ассистент может прочитать его с картинки."""
+        res, left, skipped = [], max(1, min(limit, 8)), 0
+        for h in await hw_items(date_from, date_to):
+            if subject and subject.casefold() not in (h.get("subject_name") or "").casefold():
+                continue
+            for title, url in file_links(h):
+                if left <= 0:
+                    skipped += 1
+                    continue
+                try:
+                    raw, ctype = await download(url)
+                except MesError:
+                    skipped += 1
+                    continue
+                if ctype in IMAGE_TYPES and Image is not None:
+                    res += [f"{h.get('date', '?')} · {clean(h.get('subject_name'), 60)}: {title}", Image(data=raw, format=IMAGE_TYPES[ctype])]
+                    left -= 1
+                else:
+                    skipped += 1
+        if not res:
+            return "Фото в домашних заданиях за этот период нет." + (f" Пропущено файлов (не картинки или не скачались): {skipped}." if skipped else "")
+        return res + ([f"Не показано или пропущено файлов: {skipped}."] if skipped else [])
+
     @tool()
     async def mes_marks(date_from: str = "", date_to: str = "") -> str:
         """МЭШ: оценки за период (по умолчанию за последние 14 дней): дата, предмет, оценка, вес, комментарий."""
@@ -394,25 +516,38 @@ def register(tool):
                          mobile=True, profile_id=p["profile_id"])
         return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
 
-    @tool()
-    async def mes_meals(first: int = 14) -> str:
-        """МЭШ: питание: баланс и покупки по дням (договор берётся из профиля)."""
+    async def contract(arg):
         p = await student()
-        if not p.get("contract_id"):
-            return "Договор питания в профиле не найден: у ученического аккаунта его обычно нет, он привязан к аккаунту родителя. Питание и посещаемость доступны при входе через родителя."
-        data = await get("family/mobile/v1/day_balance_info", {"contract_id": p["contract_id"], "first": max(1, min(first, 60))},
+        cid = arg or p.get("contract_id") or os.environ.get("MES_CONTRACT_ID", "").strip()
+        if not cid:
+            raise MesError("Номер договора питания неизвестен: ученический аккаунт его не отдаёт. Его можно взять в МЭШ родителя: "
+                           "школьный сайт → Питание, F12 → Network, у запросов menu / day_balance_info есть параметр contract_id. "
+                           "Передайте его в аргумент contract_id или задайте MES_CONTRACT_ID на сервере.")
+        return p, int(cid)
+
+    @tool()
+    async def mes_meals(first: int = 14, contract_id: int = 0) -> str:
+        """МЭШ: питание: баланс и покупки по дням. contract_id — номер договора питания (если профиль его не отдаёт; см. сообщение об ошибке)."""
+        p, cid = await contract(contract_id)
+        data = await get("family/mobile/v1/day_balance_info", {"contract_id": cid, "first": max(1, min(first, 60))},
                          mobile=True, profile_id=p["profile_id"])
         return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
 
     @tool()
-    async def mes_visits(date_from: str = "", date_to: str = "") -> str:
-        """МЭШ: посещаемость: приходы и уходы из школы (турникет) и питание за период (по умолчанию неделя)."""
-        p = await student()
-        if not p.get("contract_id"):
-            return "Договор питания в профиле не найден: у ученического аккаунта его обычно нет, он привязан к аккаунту родителя. Питание и посещаемость доступны при входе через родителя."
+    async def mes_menu(date: str = "", contract_id: int = 0) -> str:
+        """МЭШ: меню школьного питания на день (по умолчанию сегодня). contract_id — номер договора питания, если профиль его не отдаёт."""
+        p, cid = await contract(contract_id)
+        data = await get("family/web/v1/menu", {"date": _day(date).isoformat(), "contract_id": cid, "student_id": p["student_id"]},
+                         profile_id=p["profile_id"])
+        return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
+
+    @tool()
+    async def mes_visits(date_from: str = "", date_to: str = "", contract_id: int = 0) -> str:
+        """МЭШ: посещаемость: приходы и уходы из школы (турникет) и питание за период (по умолчанию неделя). contract_id — как в mes_meals."""
+        p, cid = await contract(contract_id)
         b = _day(date_to)
         a = _day(date_from, b - timedelta(days=7))
-        data = await get("family/mobile/v1/visits", {"student_id": p["student_id"], "contract_id": p.get("contract_id") or "",
+        data = await get("family/mobile/v1/visits", {"student_id": p["student_id"], "contract_id": cid,
                                                      "from": a.isoformat(), "to": b.isoformat()}, mobile=True, profile_id=p["profile_id"])
         return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
 
