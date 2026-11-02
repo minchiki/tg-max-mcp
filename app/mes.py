@@ -385,7 +385,7 @@ def register(tool):
         return fmt_subject_marks(items or []) or "Данных по предметам нет."
 
     @tool()
-    async def mes_lesson(lesson_id: str, kind: str = "PLAN") -> str:
+    async def mes_lesson(lesson_id: str | int, kind: str = "PLAN") -> str:
         """МЭШ: подробности урока: тема, задание, материалы (для решения ДЗ). lesson_id берите из mes_schedule/mes_homework."""
         p = await student()
         data = await get(f"family/mobile/v1/lesson_schedule_items/{lesson_id}", {"student_id": p["student_id"], "type": kind},
@@ -397,7 +397,7 @@ def register(tool):
         """МЭШ: питание: баланс и покупки по дням (договор берётся из профиля)."""
         p = await student()
         if not p.get("contract_id"):
-            return "Договор питания в профиле не найден: mes_profile покажет, что вернул МЭШ; можно запросить вручную через mes_raw."
+            return "Договор питания в профиле не найден: у ученического аккаунта его обычно нет, он привязан к аккаунту родителя. Питание и посещаемость доступны при входе через родителя."
         data = await get("family/mobile/v1/day_balance_info", {"contract_id": p["contract_id"], "first": max(1, min(first, 60))},
                          mobile=True, profile_id=p["profile_id"])
         return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
@@ -406,6 +406,8 @@ def register(tool):
     async def mes_visits(date_from: str = "", date_to: str = "") -> str:
         """МЭШ: посещаемость: приходы и уходы из школы (турникет) и питание за период (по умолчанию неделя)."""
         p = await student()
+        if not p.get("contract_id"):
+            return "Договор питания в профиле не найден: у ученического аккаунта его обычно нет, он привязан к аккаунту родителя. Питание и посещаемость доступны при входе через родителя."
         b = _day(date_to)
         a = _day(date_from, b - timedelta(days=7))
         data = await get("family/mobile/v1/visits", {"student_id": p["student_id"], "contract_id": p.get("contract_id") or "",
