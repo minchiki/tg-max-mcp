@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    # maxapi-python закреплЄн на 2.5.x: внутренн€€ модель правитс€ патчем
+    ignore:
+      - dependency-name: maxapi-python
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
