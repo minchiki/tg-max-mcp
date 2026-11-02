@@ -304,6 +304,8 @@ def fmt_events(events):
         marks = [mk.get("value") for mk in e.get("marks") or []]
         if marks:
             bits.append("оценка: " + ", ".join(map(str, marks)))
+        if e.get("id"):
+            bits.append(f"урок {e['id']} ({e.get('source') or 'PLAN'})")
         out.append(" · ".join(bits))
     return "\n".join(out)
 
@@ -386,7 +388,7 @@ def register(tool):
 
     @tool()
     async def mes_lesson(lesson_id: str | int, kind: str = "PLAN") -> str:
-        """МЭШ: подробности урока: тема, задание, материалы (для решения ДЗ). lesson_id берите из mes_schedule/mes_homework."""
+        """МЭШ: подробности урока: тема, задание, материалы (для решения ДЗ). lesson_id и kind (PLAN или EC) берите из строки «урок N (KIND)» в mes_schedule."""
         p = await student()
         data = await get(f"family/mobile/v1/lesson_schedule_items/{lesson_id}", {"student_id": p["student_id"], "type": kind},
                          mobile=True, profile_id=p["profile_id"])
