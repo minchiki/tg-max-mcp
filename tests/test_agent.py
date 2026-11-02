@@ -13,6 +13,7 @@ os.environ["AGENT_HUMAN_DELAY"] = "0"
 os.environ["ANTHROPIC_API_KEY"] = "test-key"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 import agent  # noqa: E402
+import agentmem  # noqa: E402
 import dialogs  # noqa: E402
 
 TOOLS = {}
@@ -76,6 +77,7 @@ def w(monkeypatch):
     agent.tasks.clear()
     agent._rt.clear()
     agent._sent.clear()
+    agentmem.data.clear()
     dialogs.bindings.clear()
     dialogs.busy_checks.clear()
     dialogs.net_sources.clear()
@@ -390,7 +392,7 @@ def test_gemini_is_chosen_by_key_and_request_is_well_formed(monkeypatch):
     _gemini_world(monkeypatch, handler)
     assert agent.brain() == "gemini"
     d = run(agent.decide(T, H, [dict(who="Даниил", text="привет", id=1, ts=0)], False))
-    assert d == dict(action="reply", text="Привет, давай в 6?", reason="")
+    assert d == dict(action="reply", text="Привет, давай в 6?", reason="", memory="")
     assert "gemini-3.6-flash:generateContent" in seen["url"] and "AIza" not in seen["url"] and seen["key"] == "AIza-test-key"
     assert "responseMimeType" in seen["body"] and "<chat>" in seen["body"] and "встреча" in seen["body"]
 
@@ -459,7 +461,7 @@ def test_auth_error_from_brain_stops_agent_with_clear_message(w, monkeypatch):
         await settle()
 
     run(go())
-    assert not agent.tasks and any("ключ не принят" in n for n in w.notes)
+    assert not agent.tasks and any("ключ модели не принят" in n for n in w.notes)
 
 
 def test_brain_selection_and_missing_key(monkeypatch):
@@ -522,3 +524,133 @@ def test_escalate_may_send_one_honest_message_before_stopping(w):
     run(go())
     assert [s[1] for s in w.sent] == ["Это ИИ-помощник Магомеда, он ответит сам."] and not agent.tasks
     assert any("нужен ты" in n for n in w.notes)
+
+
+# ---------- память ----------
+
+def test_memory_keeps_deleted_messages_and_tells_authors_apart(w):
+    async def go():
+        w.decisions += [reply("Здарова, ну что по встрече?")]
+        await TOOLS["agent_start"]("7", "встреча")
+        await settle()
+        await agent.on_incoming("tg", 7, 11, time.time(), "Даниил", "да норм, в 6")
+        await agent.on_outgoing("tg", 7, 12, "я сам тут напишу")
+        await settle(3.3)
+        # владелец удалил всё в чате: мессенджер теперь отдаёт пустую историю
+        async def empty(chat, n):
+            return []
+        w.history = empty
+        agent.hooks["tg"]["history"] = empty
+        w.decisions += [dict(action="wait", text="", reason="")]
+        await agent.on_incoming("tg", 7, 13, time.time(), "Даниил", "алло")
+        await settle(0.5)
+
+    run(go())
+    log = agentmem.entry("tg:7")["log"]
+    assert {(m["by"], m["text"]) for m in log} >= {("agent", "Здарова, ну что по встрече?"), ("them", "да норм, в 6"),
+                                                   ("owner", "я сам тут напишу"), ("them", "алло")}
+    text = agent._transcript(agentmem.recent("tg:7", 40))
+    assert "Я (ты, агент): Здарова" in text and "Я (владелец, написал сам): я сам тут напишу" in text and "Даниил: да норм" in text
+
+
+def test_memory_notes_are_saved_from_decision_and_reach_next_prompt(w):
+    async def go():
+        w.decisions += [dict(action="reply", text="привет", reason="", memory="На ты, шутят, мат нормально, пишет коротко")]
+        await TOOLS["agent_start"]("7", "задача")
+        await settle()
+
+    run(go())
+    assert agentmem.notes("tg:7").startswith("На ты")
+    p = agent._prompt(dict(task="т", style="", title="Даниил", net="tg", chat=7, replies=0, max_replies=5), [], [], True)
+    assert "<memory>" in p and "На ты, шутят" in p
+    agentmem.save()
+    agentmem.data.clear()
+    agentmem.load()
+    assert agentmem.notes("tg:7").startswith("На ты")
+
+
+def test_memory_tools_show_set_and_forget(w):
+    async def go():
+        assert "ещё ничего" in await TOOLS["agent_memory"]("7")
+        await TOOLS["agent_memory_set"]("7", "на вы, формально")
+        shown = await TOOLS["agent_memory"]("7")
+        assert "на вы, формально" in shown
+        assert await TOOLS["agent_memory_forget"]("7") == "Память стёрта."
+        assert "ещё ничего" in await TOOLS["agent_memory"]("7")
+
+    run(go())
+
+
+def test_memory_notes_in_prompt_are_cleaned_of_hidden_chars():
+    agentmem.data["tg:7"] = dict(title="Д", notes="заметка​‮", log=[])
+    p = agent._prompt(dict(task="т", style="", title="Д", net="tg", chat=7, replies=0, max_replies=5), [], [], True)
+    assert "​" not in p and "‮" not in p
+    agentmem.data.clear()
+
+
+# ---------- OpenAI-совместимые модели ----------
+
+def _openai_world(monkeypatch, handler):
+    for k in ("GEMINI_API_KEY", "AGENT_BRAIN"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("AGENT_BASE_URL", "https://llm.example/v1/")
+    monkeypatch.setenv("AGENT_API_KEY", "sk-test")
+    monkeypatch.setenv("AGENT_MODEL", "big-model")
+    monkeypatch.setattr(agent, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(agent.asyncio, "sleep", lambda s: real_sleep(0))
+
+
+def _chat(text, finish="stop"):
+    return httpx.Response(200, json={"choices": [{"message": {"content": text}, "finish_reason": finish}],
+                                     "usage": {"prompt_tokens": 9, "completion_tokens": 3}})
+
+
+def test_openai_compatible_brain_request_and_reply(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["url"], seen["auth"], seen["body"] = str(req.url), req.headers.get("authorization"), req.read().decode()
+        return _chat('<think>хм</think>{"action":"reply","text":"здарова","reason":"","memory":"на ты"}')
+
+    _openai_world(monkeypatch, handler)
+    assert agent.brain() == "openai" and not agent.api_key_missing()
+    d = run(agent.decide(T, H, [], False))
+    assert d == dict(action="reply", text="здарова", reason="", memory="на ты")
+    assert seen["url"] == "https://llm.example/v1/chat/completions" and seen["auth"] == "Bearer sk-test"
+    assert "\"model\":\"big-model\"" in seen["body"] and "<chat>" in seen["body"]
+
+
+def test_openai_compatible_drops_response_format_on_400_and_retries_bad_json(monkeypatch):
+    bodies = []
+    answers = iter(["не json", '{"action":"wait","text":"","reason":"","memory":""}'])
+
+    def handler(req):
+        bodies.append(req.read().decode())
+        if "response_format" in bodies[-1]:
+            return httpx.Response(400, json={"error": {"message": "response_format unsupported"}})
+        return _chat(next(answers))
+
+    _openai_world(monkeypatch, handler)
+    assert run(agent.decide(T, H, [], False))["action"] == "wait" and len(bodies) == 3
+
+
+def test_openai_compatible_errors(monkeypatch):
+    _openai_world(monkeypatch, lambda req: httpx.Response(401, json={}))
+    with pytest.raises(agent.AuthenticationError):
+        run(agent.decide(T, H, [], False))
+    _openai_world(monkeypatch, lambda req: httpx.Response(429, json={}))
+    with pytest.raises(agent.RateLimitError):
+        run(agent.decide(T, H, [], False))
+
+
+def test_openai_brain_needs_url_key_and_model(monkeypatch):
+    for k in ("GEMINI_API_KEY", "AGENT_MODEL", "AGENT_BASE_URL", "AGENT_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("AGENT_BRAIN", "openai")
+    assert agent.api_key_missing()
+    monkeypatch.setenv("AGENT_BASE_URL", "https://x/v1")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    assert agent.api_key_missing()  # нет модели
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    assert not agent.api_key_missing()
