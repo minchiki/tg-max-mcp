@@ -65,7 +65,10 @@ def tool(write=False, destructive=False, **kw):
             try:
                 return await fn(*a, **k)
             except Exception as e:
-                traceback.print_exc()
+                if type(e).__name__ in ("MesAuthError", "MesError", "ValueError", "PermissionError"):
+                    print(f"TOOL {fn.__name__}: {type(e).__name__}", file=sys.stderr, flush=True)  # ожидаемая ошибка без трассировки
+                else:
+                    traceback.print_exc()
                 return f"Ошибка: {type(e).__name__}: {e}"
         ann = ToolAnnotations(read_only_hint=not write, destructive_hint=destructive, open_world_hint=True)
         return mcp.tool(annotations=ann, **kw)(wrapper)

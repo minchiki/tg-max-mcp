@@ -10,6 +10,7 @@
 import asyncio
 import getpass
 import html
+import os
 import re
 import sys
 import time
@@ -75,6 +76,30 @@ async def qr_login():
         return access, refresh or ""
 
 
+async def finish(access, refresh):
+    """Сохранить токены и проверить их запросом профиля; при неудаче вернуть прежний вход (если был)."""
+    if not (access or "").strip():
+        raise mes.MesError("токен пустой")
+    mes.load()
+    old = dict(mes.state)
+    mes.set_tokens(access, refresh)
+    try:
+        return await mes.me(refresh=True)
+    except Exception:
+        mes.state.clear()
+        mes.state.update(old)
+        if old.get("access"):
+            mes.save()
+        else:
+            try:
+                os.remove(mes.FILE)
+            except OSError:
+                pass
+        mes._cache.clear()
+        mes._profile.clear()
+        raise
+
+
 async def main():
     if "--stdin" in sys.argv:
         access, refresh = sys.stdin.readline().strip(), sys.stdin.readline().strip()
@@ -83,13 +108,10 @@ async def main():
         refresh = getpass.getpass("aupd_refresh_token (можно пусто, ввод скрыт): ").strip()
     else:
         access, refresh = await qr_login()
-    if not access:
-        raise SystemExit("Токен пустой")
-    mes.set_tokens(access, refresh)
     try:
-        p = await mes.me(refresh=True)
+        p = await finish(access, refresh)
     except (mes.MesAuthError, mes.MesError) as e:
-        print(f"Токены сохранены, но проверка не прошла: {e}")
+        print(f"Токены не подошли, прежний вход оставлен как был: {e}")
         raise SystemExit(1)
     print(f"Готово: {p['name'] or '?'}, {p['class_name'] or '?'}, {p['school'] or '?'}")
 

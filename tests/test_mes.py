@@ -181,3 +181,31 @@ def test_jwt_expiry_parse():
     import base64
     payload = base64.urlsafe_b64encode(json.dumps({"exp": 1900000000}).encode()).decode().rstrip("=")
     assert mes.jwt_expiry(f"x.{payload}.y") == 1900000000 and mes.jwt_expiry("not-a-jwt") is None
+
+
+def test_login_with_bad_tokens_keeps_previous_login(net, monkeypatch):
+    import mes_login
+
+    def handler(req):
+        return httpx.Response(401, json={})
+
+    monkeypatch.setattr(mes, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(mes.MesAuthError):
+        run(mes_login.finish("bad-access", "bad-refresh"))
+    assert mes.state["access"] == "access-1" and json.load(open(mes.FILE))["access"] == "access-1"
+
+
+def test_login_without_previous_login_leaves_no_file(monkeypatch):
+    import mes_login
+    mes.state.clear()
+    monkeypatch.setattr(mes, "FILE", os.path.join(tempfile.mkdtemp(), "fresh.json"))
+    monkeypatch.setattr(mes, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(401, json={}))))
+    with pytest.raises(mes.MesAuthError):
+        run(mes_login.finish("bad", ""))
+    assert not os.path.exists(mes.FILE) and not mes.state
+
+
+def test_login_good_tokens_are_saved_and_verified(net):
+    import mes_login
+    p = run(mes_login.finish("access-1", "refresh-1"))
+    assert p["name"] == "Петров Иван" and json.load(open(mes.FILE))["access"] == "access-1"
