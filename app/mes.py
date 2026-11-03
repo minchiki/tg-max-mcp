@@ -516,30 +516,76 @@ def register(tool, Image=None):
                          mobile=True, profile_id=p["profile_id"])
         return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
 
+    def rub(kop):
+        v = (kop or 0) / 100
+        return (f"{v:.2f}".rstrip("0").rstrip(".") or "0") + " ₽"
+
+    async def food(path, p, **params):
+        """Питание: отдельный API food/meals/v3, клиент — personId ученика (договор не нужен)."""
+        cid = json.dumps({"personId": p["person_id"]}, separators=(",", ":"))
+        if path.endswith("balance"):
+            return await get(path, {"clientIds": "[" + cid + "]"}, ttl=0)
+        return await get(path, {"clientId": cid, **params}, ttl=0)
+
     async def contract(arg):
         p = await student()
         cid = arg or p.get("contract_id") or os.environ.get("MES_CONTRACT_ID", "").strip()
         if not cid:
-            raise MesError("Номер договора питания неизвестен: ученический аккаунт его не отдаёт. Его можно взять в МЭШ родителя: "
-                           "школьный сайт → Питание, F12 → Network, у запросов menu / day_balance_info есть параметр contract_id. "
-                           "Передайте его в аргумент contract_id или задайте MES_CONTRACT_ID на сервере.")
+            bal = await food("food/meals/v3/clients/balance", p)
+            cid = (bal[0].get("contractId") if isinstance(bal, list) and bal else None)
+        if not cid:
+            raise MesError("Номер договора питания не найден: передайте его в аргумент contract_id или задайте MES_CONTRACT_ID на сервере.")
         return p, int(cid)
 
-    @tool()
-    async def mes_meals(first: int = 14, contract_id: int = 0) -> str:
-        """МЭШ: питание: баланс и покупки по дням. contract_id — номер договора питания (если профиль его не отдаёт; см. сообщение об ошибке)."""
-        p, cid = await contract(contract_id)
-        data = await get("family/mobile/v1/day_balance_info", {"contract_id": cid, "first": max(1, min(first, 60))},
-                         mobile=True, profile_id=p["profile_id"])
-        return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
+    ORDER_STATUS = {0: "оформлен", 1: "оформлен", 2: "отменён", 3: "выдан"}
 
     @tool()
-    async def mes_menu(date: str = "", contract_id: int = 0) -> str:
-        """МЭШ: меню школьного питания на день (по умолчанию сегодня). contract_id — номер договора питания, если профиль его не отдаёт."""
-        p, cid = await contract(contract_id)
-        data = await get("family/web/v1/menu", {"date": _day(date).isoformat(), "contract_id": cid, "student_id": p["student_id"]},
-                         profile_id=p["profile_id"])
-        return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
+    async def mes_meals(date_from: str = "", date_to: str = "") -> str:
+        """МЭШ: питание: баланс карты, что ел ученик (завтраки, обеды, буфет) за период (по умолчанию 14 дней), лимит и доступные режимы."""
+        p = await student()
+        b = _day(date_to)
+        a = _day(date_from, b - timedelta(days=14))
+        bal = await food("food/meals/v3/clients/balance", p)
+        orders = await food("food/meals/v3/orders", p, **{"from": a.isoformat(), "to": b.isoformat(), "limit": 50})
+        out = []
+        if isinstance(bal, list) and bal:
+            x = bal[0]
+            lim = (x.get("expenseConstraints") or {}).get("expenseDayLimit")
+            out.append(f"Баланс: {rub(x.get('balance'))}" + (f" · лимит в день {rub(lim)}" if lim else ""))
+        for o in (orders or {}).get("orders", []):
+            when = (o.get("deliveredAt") or o.get("createdAt") or "")[:16].replace("T", " ")
+            lines = []
+            for it in o.get("items") or []:
+                c = it.get("complex")
+                if c:
+                    dishes = ", ".join(d.get("name", "") for d in c.get("complexItems") or [] if d.get("name"))
+                    lines.append(f"{c.get('name', 'комплекс')}: {dishes}")
+                d = it.get("dish")
+                if d:
+                    lines.append(f"{d.get('name', 'блюдо')} × {it.get('amount', 1)}")
+            pay = rub(o.get("totalPrice")) if o.get("totalPrice") else "бесплатно (льгота)"
+            out.append(f"{when} · {ORDER_STATUS.get(o.get('status'), o.get('status'))} · {pay}\n  " + "\n  ".join(lines))
+        if len(out) == 1:
+            out.append(f"За {a.isoformat()} — {b.isoformat()} покупок нет.")
+        return clean("\n".join(out), RAW_LIMIT)
+
+    @tool()
+    async def mes_menu(date: str = "") -> str:
+        """МЭШ: меню школьной столовой на день (по умолчанию сегодня): комплексы, блюда, калории, цена."""
+        p = await student()
+        d = _day(date).isoformat()
+        data = await food("food/meals/v3/menu/complexes", p, **{"from": d, "to": d, "withPreorder": "in"})
+        out = []
+        for day in data or []:
+            for c in day.get("items") or []:
+                rows = []
+                for ci in c.get("complexItems") or []:
+                    x = ci.get("dish") or ci
+                    kc = f", {x['calories']} ккал" if x.get("calories") else ""
+                    w = f", {x['weight']} г" if x.get("weight") else ""
+                    rows.append(f"  - {x.get('name', '?')}{w}{kc}")
+                out.append(f"{day.get('onDate', d)} · {c.get('name')} · {rub(c.get('price'))}\n" + "\n".join(rows))
+        return clean("\n".join(out) or f"На {d} меню нет.", RAW_LIMIT)
 
     @tool()
     async def mes_visits(date_from: str = "", date_to: str = "", contract_id: int = 0) -> str:

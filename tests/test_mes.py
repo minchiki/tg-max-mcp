@@ -41,6 +41,12 @@ SUBJECTS = {"payload": [{"subject_name": "Алгебра", "average_by_all": "4.
 EVENTS = {"response": [{"source": "PLAN", "start_at": "2026-11-02T08:30:00+03:00", "finish_at": "2026-11-02T09:10:00+03:00",
                         "subject_name": "Алгебра", "room_number": "301", "homework": {"descriptions": ["№ 123"]},
                         "marks": [{"value": "5"}]}]}
+FOOD_BALANCE = [{"clientId": {"personId": "person-uid-1"}, "contractId": 99, "balance": 1300,
+                 "expenseConstraints": {"expenseDayLimit": 20000}}]
+FOOD_ORDERS = {"hasNext": False, "orders": [{"status": 3, "deliveredAt": "2026-11-03T11:15:17+03:00", "totalPrice": 0, "items": [
+    {"complex": {"name": "Завтрак 5-11", "complexItems": [{"name": "Гречка"}, {"name": "Компот"}]}}]}]}
+FOOD_MENU = [{"onDate": "2026-11-05", "items": [{"name": "Обед", "price": 36303, "complexItems": [
+    {"dish": {"name": "Пельмени", "weight": "180", "calories": 335}}]}]}]
 
 
 @pytest.fixture
@@ -62,7 +68,8 @@ def net(monkeypatch):
             return httpx.Response(401, json={})
         routes = {"/api/family/web/v1/profile": PROFILE, "/v1/oauth/userinfo": USERINFO, "/api/family/web/v1/homeworks": HOMEWORK,
                   "/api/family/web/v1/marks": MARKS, "/api/family/web/v1/subject_marks": SUBJECTS,
-                  "/api/eventcalendar/v1/api/events": EVENTS}
+                  "/api/eventcalendar/v1/api/events": EVENTS, "/api/food/meals/v3/clients/balance": FOOD_BALANCE,
+                  "/api/food/meals/v3/orders": FOOD_ORDERS, "/api/food/meals/v3/menu/complexes": FOOD_MENU}
         return httpx.Response(200, json=routes[path]) if path in routes else httpx.Response(404, json={})
 
     monkeypatch.setattr(mes, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"User-Agent": "t"}))
@@ -220,9 +227,11 @@ def test_file_links_and_download_guard():
     assert mes._file_host_ok("https://school.mos.ru/ej/a.jpg") and mes._file_host_ok("https://cdn.mos.ru/a.jpg")
 
 
-def test_meals_without_contract_explain_how_to_get_it_and_accept_manual_id(net, monkeypatch):
-    monkeypatch.delenv("MES_CONTRACT_ID", raising=False)
-    run(mes.me())
-    mes._profile["contract_id"] = None
-    with pytest.raises(mes.MesError, match="contract_id"):
-        run(TOOLS["mes_meals"]())
+def test_meals_and_menu_work_for_student_without_contract(net):
+    out = run(TOOLS["mes_meals"]("2026-11-01", "2026-11-04"))
+    assert "Баланс: 13 ₽" in out and "лимит в день 200 ₽" in out
+    assert "выдан" in out and "бесплатно" in out and "Гречка, Компот" in out
+    menu = run(TOOLS["mes_menu"]("2026-11-05"))
+    assert "Обед" in menu and "363.03 ₽" in menu and "Пельмени, 180 г, 335 ккал" in menu
+    q = [c[3] for c in net if c[1].endswith("/menu/complexes")][0]
+    assert q["withPreorder"] == "in" and "person-uid-1" in q["clientId"]
