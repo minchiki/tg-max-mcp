@@ -378,6 +378,43 @@ def fmt_events(events):
 
 # ---------- инструменты ----------
 
+VISION_PROMPT = ("Это фото домашнего задания по школьному предмету (из электронного дневника). Перепиши всё задание дословно: "
+                 "номера задач, условия, числа, формулы и выражения обычным текстом (степени как x^2, дроби как (a)/(b), корни как "
+                 "sqrt(...), индексы как a_1). Рисунки и чертежи кратко опиши словами. Ничего не решай и не добавляй от себя. "
+                 "Неразборчивое помечай [неразборчиво]. Если на фото несколько заданий или страниц, перепиши все по порядку.")
+
+
+async def read_photo(data, ctype):
+    """Распознать фото задания моделью Gemini (ключ GEMINI_API_KEY на сервере, через тот же прокси, что и у агента)."""
+    import base64
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not key:
+        raise MesError("Чтобы читать фото с ДЗ, на сервере нужен GEMINI_API_KEY (бесплатный, aistudio.google.com).")
+    proxy = (os.environ.get("AGENT_PROXY") or os.environ.get("TG_PROXY") or "").strip().replace("socks5h://", "socks5://") or None
+    body = {"contents": [{"role": "user", "parts": [{"text": VISION_PROMPT},
+                                                    {"inlineData": {"mimeType": ctype, "data": base64.b64encode(data).decode()}}]}],
+            "generationConfig": {"temperature": 0.1}}
+    last = ""
+    async with httpx.AsyncClient(proxy=proxy, timeout=90) as h:
+        for model in (os.environ.get("MES_VISION_MODEL", "gemini-3.6-flash"), "gemini-3.5-flash-lite", "gemini-3.6-flash"):
+            r = await h.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent", json=body,
+                             headers={"x-goog-api-key": key, "content-type": "application/json"})
+            if r.status_code == 200:
+                try:
+                    parts = r.json()["candidates"][0]["content"]["parts"]
+                    text = "".join(p.get("text", "") for p in parts).strip()
+                    if text:
+                        return text
+                except (KeyError, IndexError, ValueError):
+                    pass
+                last = "пустой ответ модели"
+            else:
+                last = f"{r.status_code}"
+                if r.status_code in (401, 403):
+                    break
+    raise MesError(f"Не удалось распознать фото ({last}).")
+
+
 def register(tool, Image=None):
     async def student():
         p = await me()
@@ -462,6 +499,34 @@ def register(tool, Image=None):
         if ctype in IMAGE_TYPES and Image is not None:
             return [f"Файл {name_}, {len(data) // 1024} КБ", Image(data=data, format=IMAGE_TYPES[ctype])]
         return f"Файл {name_}: тип {ctype or '?'}, {len(data) // 1024} КБ. Показать можно только картинки (jpeg, png, webp, gif)."
+
+    @tool()
+    async def mes_homework_read(date_from: str = "", date_to: str = "", subject: str = "", limit: int = 4) -> str:
+        """МЭШ: прочитать задания с фото в домашних заданиях и вернуть их ТЕКСТОМ (по умолчанию от сегодня на 7 дней).
+
+        Сервер сам распознаёт фото, поэтому ассистенту не нужно уметь смотреть картинки: он получает условия задач
+        (номера, числа, формулы) и сразу решает. subject — часть названия предмета (например «алгебра»), limit — сколько фото (до 6).
+        Вызывайте это, когда спрашивают, что задали или просят решить ДЗ, если у задания есть файл."""
+        out, left = [], max(1, min(limit, 6))
+        for h in await hw_items(date_from, date_to):
+            if subject and subject.casefold() not in (h.get("subject_name") or "").casefold():
+                continue
+            head = f"{h.get('date', '?')} · {clean(h.get('subject_name'), 60)}"
+            if h.get("description"):
+                head += f": {clean(h['description'], 300)}"
+            for title, url in file_links(h):
+                if left <= 0:
+                    break
+                try:
+                    raw, ctype = await download(url)
+                    if ctype not in IMAGE_TYPES:
+                        out.append(f"{head}\n  [файл {clean(title, 60)}: не фото ({ctype or '?'}), прочитать нельзя]")
+                        continue
+                    left -= 1
+                    out.append(f"{head}\n  Фото «{clean(title, 60)}»:\n{clean(await read_photo(raw, ctype), RAW_LIMIT)}")
+                except MesError as e:
+                    out.append(f"{head}\n  [{clean(title, 60)}: {e}]")
+        return "\n\n".join(out) or "Фото в домашних заданиях за этот период нет."
 
     @tool()
     async def mes_homework_photos(date_from: str = "", date_to: str = "", subject: str = "", limit: int = 5):

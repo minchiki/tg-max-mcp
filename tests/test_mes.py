@@ -235,3 +235,28 @@ def test_meals_and_menu_work_for_student_without_contract(net):
     assert "Обед" in menu and "363.03 ₽" in menu and "Пельмени, 180 г, 335 ккал" in menu
     q = [c[3] for c in net if c[1].endswith("/menu/complexes")][0]
     assert q["withPreorder"] == "in" and "person-uid-1" in q["clientId"]
+
+
+def test_homework_read_turns_photo_into_text(net, monkeypatch):
+    mat = [{"title": "фото.jpg", "urls": [{"url": "https://school.mos.ru/ej/attachments/files/1/original/a.jpg", "type": "file_link"}]}]
+    monkeypatch.setitem(HOMEWORK["payload"][0], "materials", mat)
+    seen = []
+
+    async def fake_download(url):
+        return b"jpegbytes", "image/jpeg"
+
+    async def fake_read(data, ctype):
+        seen.append((data, ctype))
+        return "№ 123. Решите: x^2 - 4 = 0"
+
+    monkeypatch.setattr(mes, "download", fake_download)
+    monkeypatch.setattr(mes, "read_photo", fake_read)
+    out = run(TOOLS["mes_homework_read"]("2026-11-03", "2026-11-05", "алгебра"))
+    assert "Алгебра" in out and "№ 123. Решите: x^2 - 4 = 0" in out and "История" not in out
+    assert seen == [(b"jpegbytes", "image/jpeg")]
+
+
+def test_read_photo_needs_gemini_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(mes.MesError, match="GEMINI_API_KEY"):
+        run(mes.read_photo(b"x", "image/jpeg"))
