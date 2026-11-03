@@ -378,6 +378,18 @@ def fmt_events(events):
 
 # ---------- инструменты ----------
 
+def rub(kop):
+    v = (kop or 0) / 100
+    return (f"{v:.2f}".rstrip("0").rstrip(".") or "0") + " ₽"
+
+async def food(path, p, **params):
+    """Питание: отдельный API food/meals/v3, клиент — personId ученика (договор не нужен)."""
+    cid = json.dumps({"personId": p["person_id"]}, separators=(",", ":"))
+    if path.endswith("balance"):
+        return await get(path, {"clientIds": "[" + cid + "]"}, ttl=0)
+    return await get(path, {"clientId": cid, **params}, ttl=0)
+
+
 VISION_PROMPT = ("Это фото домашнего задания по школьному предмету (из электронного дневника). Перепиши всё задание дословно: "
                  "номера задач, условия, числа, формулы и выражения обычным текстом (степени как x^2, дроби как (a)/(b), корни как "
                  "sqrt(...), индексы как a_1). Рисунки и чертежи кратко опиши словами. Ничего не решай и не добавляй от себя. "
@@ -580,17 +592,6 @@ def register(tool, Image=None):
         data = await get(f"family/mobile/v1/lesson_schedule_items/{lesson_id}", {"student_id": p["student_id"], "type": kind},
                          mobile=True, profile_id=p["profile_id"])
         return clean(json.dumps(data, ensure_ascii=False, indent=1), RAW_LIMIT)
-
-    def rub(kop):
-        v = (kop or 0) / 100
-        return (f"{v:.2f}".rstrip("0").rstrip(".") or "0") + " ₽"
-
-    async def food(path, p, **params):
-        """Питание: отдельный API food/meals/v3, клиент — personId ученика (договор не нужен)."""
-        cid = json.dumps({"personId": p["person_id"]}, separators=(",", ":"))
-        if path.endswith("balance"):
-            return await get(path, {"clientIds": "[" + cid + "]"}, ttl=0)
-        return await get(path, {"clientId": cid, **params}, ttl=0)
 
     async def contract(arg):
         p = await student()

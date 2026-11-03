@@ -25,6 +25,7 @@ import agent
 import dialogs
 import media
 import mes
+import mesnotify
 from dates import parse_when
 from safety import INSTRUCTIONS, clean, name
 from tgcfg import make_client
@@ -871,6 +872,7 @@ class Boot:
                 if m["type"] == "lifespan.startup":
                     agent.start()
                     dialogs.start()
+                    mesnotify.start()
                 return m
             return await self.app(scope, recv, send)
         return await self.app(scope, receive, send)
