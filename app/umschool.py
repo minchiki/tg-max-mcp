@@ -309,13 +309,13 @@ def _range(date_from, date_to):
 
 async def _month_days(path, a, b):
     """Расписание отдаётся по месяцам: собираем все месяцы периода и оставляем дни внутри него."""
-    out, y, m = [], a.year, a.month
+    out, y, m = {}, a.year, a.month
     while (y, m) <= (b.year, b.month):
         for day in await get(path, {"year": y, "month": m}) or []:
             if a.isoformat() <= str(day.get("day")) <= b.isoformat():
-                out.append(day)
+                out.setdefault(day["day"], day)  # соседние месяцы перекрываются: день берём один раз
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
-    return sorted(out, key=lambda d: d["day"])
+    return [out[k] for k in sorted(out)]
 
 
 def fmt_schedule(days):
@@ -326,7 +326,7 @@ def fmt_schedule(days):
             for les in ct.get("lessons") or []:
                 flags = (", эфир" if les.get("is_live") else "") + (", не просмотрено" if not les.get("is_viewed") else "")
                 lines.append(f"  {hhmm(les.get('start_datetime'))[6:]} {clean(ct.get('title'), 40)}: {clean(les.get('title'), 90)} "
-                             f"({les.get('duration')} мин{flags}, урок {les.get('id')})")
+                             f"({flags[2:] + ', ' if flags else ''}урок {les.get('id')})")
     return "\n".join(lines) or "занятий в этот период нет"
 
 

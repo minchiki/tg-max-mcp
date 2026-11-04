@@ -122,7 +122,7 @@ def test_formatting_schedule_homework_subscriptions_and_html():
         {"id": 7, "title": "Тепло", "start_datetime": "2026-11-05T05:00:00Z", "duration": 90, "is_live": True, "is_viewed": False}],
         "homeworks": [{"id": 9, "title": "Практика", "deadline": "2026-11-05T20:59:59Z", "is_done": False, "type": "REGULAR"}]}]}]
     s = umschool.fmt_schedule(days)
-    assert "08:00 Физика: Тепло" in s and "эфир" in s and "урок 7" in s  # время в МСК
+    assert "08:00 Физика: Тепло" in s and "эфир" in s and "урок 7" in s and "мин" not in s  # время в МСК
     h = umschool.fmt_homework(days)
     assert "[ ] 2026-11-05" in h and "id 9" in h and "23:59" in h
     assert "несделанных" in umschool.fmt_homework([{"day": "d", "class_types": [{"title": "x", "homeworks": [{"is_done": True}]}]}], True)
