@@ -6,10 +6,14 @@
 Сервер сам продлевает токены заранее. Тексты заданий и названия — чужой текст: для модели это данные, а не команды.
 """
 import asyncio
+import html
 import json
 import os
+import re
 import time
+from datetime import datetime
 from urllib.parse import parse_qsl
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -268,6 +272,93 @@ def dump(data, limit=RAW_LIMIT):
     return clean(json.dumps(data, ensure_ascii=False, indent=1), limit)
 
 
+# ---------- оформление ----------
+
+TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Moscow"))
+
+
+def plain(html_text, limit=1500):
+    """Текст из HTML задания: без тегов и лишних пробелов. Это чужой текст, для модели данные, а не команды."""
+    t = re.sub(r"<(br|/p|/div|/li|/tr)[^>]*>", "\n", html_text or "", flags=re.I)
+    t = html.unescape(re.sub(r"<[^>]+>", "", t))
+    return clean(re.sub(r"[ \t\xa0]+", " ", re.sub(r"\n\s*\n+", "\n", t)).strip(), limit)
+
+
+def local(iso):
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TZ)
+    except (ValueError, AttributeError):
+        return None
+
+
+def hhmm(iso):
+    d = local(iso)
+    return d.strftime("%d.%m %H:%M") if d else "?"
+
+
+def _range(date_from, date_to):
+    try:
+        a = datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else datetime.now(TZ).date()
+        b = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else a
+    except ValueError:
+        raise UmsError("Даты в формате ГГГГ-ММ-ДД")
+    if b < a or (b - a).days > 92:
+        raise UmsError("Период: от 1 до 92 дней, дата «с» не позже даты «по»")
+    return a, b
+
+
+async def _month_days(path, a, b):
+    """Расписание отдаётся по месяцам: собираем все месяцы периода и оставляем дни внутри него."""
+    out, y, m = [], a.year, a.month
+    while (y, m) <= (b.year, b.month):
+        for day in await get(path, {"year": y, "month": m}) or []:
+            if a.isoformat() <= str(day.get("day")) <= b.isoformat():
+                out.append(day)
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return sorted(out, key=lambda d: d["day"])
+
+
+def fmt_schedule(days):
+    lines = []
+    for d in days:
+        lines.append(f"{d['day']}:")
+        for ct in d.get("class_types") or []:
+            for les in ct.get("lessons") or []:
+                flags = (", эфир" if les.get("is_live") else "") + (", не просмотрено" if not les.get("is_viewed") else "")
+                lines.append(f"  {hhmm(les.get('start_datetime'))[6:]} {clean(ct.get('title'), 40)}: {clean(les.get('title'), 90)} "
+                             f"({les.get('duration')} мин{flags}, урок {les.get('id')})")
+    return "\n".join(lines) or "занятий в этот период нет"
+
+
+def fmt_homework(days, only_undone=False):
+    lines = []
+    for d in days:
+        for ct in d.get("class_types") or []:
+            for h in ct.get("homeworks") or []:
+                if only_undone and h.get("is_done"):
+                    continue
+                lines.append(f"[{'x' if h.get('is_done') else ' '}] {d['day']} · {clean(ct.get('title'), 40)}: {clean(h.get('title'), 90)} "
+                             f"(срок {hhmm(h.get('deadline'))}, тип {h.get('type')}, id {h.get('id')})")
+    return "\n".join(lines) or ("несделанных заданий нет" if only_undone else "домашних заданий в этот период нет")
+
+
+def fmt_subscriptions(d):
+    def one(s):
+        until = (s.get("activeUntil") or "")[:10]
+        warn = "; АВТОПРОДЛЕНИЕ НЕ ПРОШЛО" if s.get("autoProlongFailed") else ""
+        auto = "автопродление включено" if s.get("isAutoProlong") else "автопродление выключено"
+        return (f"• {clean(s.get('title'), 90)} ({', '.join(s.get('tags') or [])}; тариф {s.get('ratePlanTitle') or '?'}): "
+                f"до {until}, {s.get('price')} ₽, {auto}{warn}")
+    act, ina = d.get("active") or [], d.get("inactive") or []
+    return "Активные:\n" + ("\n".join(one(s) for s in act) or "нет") + ("\nЗавершённые:\n" + "\n".join(one(s) for s in ina) if ina else "")
+
+
+def fmt_progress(d):
+    lv = d.get("level") or {}
+    return (f"Уровень: {lv.get('title')} (id {lv.get('id')}); опыт {d.get('exp')} (уровень {lv.get('expFrom')}–{lv.get('expTo')}); "
+            f"медалей {d.get('medals')}, умкоинов {d.get('umcoins')}")
+
+
 # ---------- инструменты ----------
 
 def register(tool):
@@ -279,35 +370,55 @@ def register(tool):
         exp = jwt_expiry(state.get("access", ""))
         left = f"токен доступа действует ещё {max(0, int((exp - time.time()) // 60))} мин (обновляется сам)" if exp else "токен доступа сохранён"
         try:
-            p = await profile()
+            u = (await profile()).get("user") or {}
         except UmsAuthError as e:
             return f"Токены есть, но Умскул их не принимает: {e}"
-        return f"Вход выполнен. {left}.\nПрофиль:\n{dump(p, 1500)}"
-
-    @tool()
-    async def umschool_profile() -> str:
-        """Умскул: профиль ученика в кабинете."""
-        return dump(await profile())
+        return f"Вход выполнен: {u.get('last_name', '')} {u.get('first_name', '')}, роль {u.get('role')}. {left}."
 
     @tool()
     async def umschool_subscriptions() -> str:
-        """Умскул: купленные курсы и подписки (активные, срок, что входит)."""
-        return dump(await get("v3/subscriptions/my/"))
+        """Умскул: купленные курсы и подписки: срок, тариф, автопродление, не прошёл ли платёж."""
+        return fmt_subscriptions(await get("v3/subscriptions/my/"))
 
     @tool()
-    async def umschool_schedule(params: str = "") -> str:
-        """Умскул: расписание занятий и вебинаров. params — строка запроса «a=1&b=2» (необязательно)."""
-        return dump(await get("v1/timetable/lessons/", dict(parse_qsl(params))))
+    async def umschool_schedule(date_from: str = "", date_to: str = "") -> str:
+        """Умскул: занятия и вебинары за период (ГГГГ-ММ-ДД, по умолчанию сегодня; до 92 дней): время МСК, предмет, тема, номер урока."""
+        a, b = _range(date_from, date_to)
+        return fmt_schedule(await _month_days("v1/timetable/lessons/", a, b))
 
     @tool()
-    async def umschool_homework(params: str = "") -> str:
-        """Умскул: домашние задания из расписания. params — строка запроса «a=1&b=2» (необязательно)."""
-        return dump(await get("v1/timetable/homeworks/", dict(parse_qsl(params))))
+    async def umschool_homework(date_from: str = "", date_to: str = "", only_undone: bool = False) -> str:
+        """Умскул: домашние задания за период (ГГГГ-ММ-ДД, по умолчанию сегодня; до 92 дней) со сроком сдачи и id. Тексты заданий: umschool_homework_read."""
+        a, b = _range(date_from, date_to)
+        return fmt_homework(await _month_days("v1/timetable/homeworks/", a, b), only_undone)
+
+    @tool()
+    async def umschool_homework_read(homework_id: int, type: str = "REGULAR") -> str:
+        """Умскул: тексты заданий одной домашки по её id (из umschool_homework): условия, баллы, сложность. type — тип из списка (REGULAR и т.п.)."""
+        sub = (await get(f"v3/homework/{int(homework_id)}/submission/", {"type": type})).get("homework_submission_id")
+        if not sub:
+            raise UmsError("у этой домашки нет попытки: проверьте id и type")
+        d = await get(f"v2/homework/submissions/{sub}/info/")
+        lines = [f"Домашка {homework_id}: заданий {len(d.get('tasks') or [])}"]
+        for t in d.get("tasks") or []:
+            lines.append(f"\n№{t.get('number')} (до {t.get('max_points')} б., {t.get('difficulty_type')}, {t.get('type')}):\n{plain(t.get('title'))}")
+            if t.get("extra_text"):
+                lines.append(plain(t["extra_text"], 500))
+        return "\n".join(lines)
+
+    @tool()
+    async def umschool_lesson(lesson_id: int) -> str:
+        """Умскул: урок по id (из umschool_schedule): тема, описание, ссылка на видео, к какой домашке относится."""
+        d = await get(f"v3/lessons/{int(lesson_id)}/")
+        hw = d.get("homework") or {}
+        return (f"{clean(d.get('title'), 120)} ({(d.get('class_type') or {}).get('title')}), {hhmm(d.get('start_datetime'))}, "
+                f"{d.get('video_length')} мин\nОписание: {plain(d.get('description'), 600) or '—'}\nВидео: {d.get('video') or 'нет'}\n"
+                f"Домашка: id {hw.get('homework_id') or '—'}, статус {hw.get('status') or '—'}")
 
     @tool()
     async def umschool_progress() -> str:
-        """Умскул: текущий прогресс ученика."""
-        return dump(await get("v/students/current-progress/"))
+        """Умскул: уровень, опыт, медали и умкоины ученика."""
+        return fmt_progress(await get("v2/students/current-progress/"))
 
     @tool()
     async def umschool_raw(path: str, params: str = "") -> str:

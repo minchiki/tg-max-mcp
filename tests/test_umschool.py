@@ -69,7 +69,8 @@ def net(monkeypatch):
         if p.endswith("/auth/verify/"):
             return httpx.Response(200, json={"id": 5, "first_name": "Иван"})
         if p.endswith("/subscriptions/my/"):
-            return httpx.Response(200, json=[{"title": "ОГЭ русский"}])
+            return httpx.Response(200, json={"active": [{"title": "ОГЭ русский", "tags": [], "activeUntil": "2027-01-01T00:00:00Z",
+                                                         "price": "1.00", "isAutoProlong": False}], "inactive": []})
         return httpx.Response(404, json={})
 
     monkeypatch.setattr(umschool, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -114,3 +115,34 @@ def test_not_logged_in_message(monkeypatch):
     umschool.state.clear()
     monkeypatch.setattr(umschool, "FILE", os.path.join(tempfile.mkdtemp(), "none.json"))
     assert "не выполнен" in run(TOOLS["umschool_status"]())
+
+
+def test_formatting_schedule_homework_subscriptions_and_html():
+    days = [{"day": "2026-11-05", "class_types": [{"title": "Физика", "lessons": [
+        {"id": 7, "title": "Тепло", "start_datetime": "2026-11-05T05:00:00Z", "duration": 90, "is_live": True, "is_viewed": False}],
+        "homeworks": [{"id": 9, "title": "Практика", "deadline": "2026-11-05T20:59:59Z", "is_done": False, "type": "REGULAR"}]}]}]
+    s = umschool.fmt_schedule(days)
+    assert "08:00 Физика: Тепло" in s and "эфир" in s and "урок 7" in s  # время в МСК
+    h = umschool.fmt_homework(days)
+    assert "[ ] 2026-11-05" in h and "id 9" in h and "23:59" in h
+    assert "несделанных" in umschool.fmt_homework([{"day": "d", "class_types": [{"title": "x", "homeworks": [{"is_done": True}]}]}], True)
+    sub = umschool.fmt_subscriptions({"active": [{"title": "ОГЭ", "tags": ["Годовой"], "activeUntil": "2026-10-31T23:59:59Z",
+                                                  "price": "5990.00", "isAutoProlong": True, "autoProlongFailed": True}]})
+    assert "АВТОПРОДЛЕНИЕ НЕ ПРОШЛО" in sub and "до 2026-10-31" in sub
+    assert umschool.plain("<p>Масса&nbsp;15 &lt;кг&gt;</p><p>Найти</p>") == "Масса 15 <кг>\nНайти"
+
+
+def test_period_validation_and_month_walk(net, monkeypatch):
+    umschool.set_tokens("acc-1", "ref-1")
+    with pytest.raises(umschool.UmsError):
+        umschool._range("2026-11-05", "2026-11-01")
+    seen = []
+
+    async def fake_get(path, params=None):
+        seen.append((params["year"], params["month"]))
+        return [{"day": f"{params['year']}-{params['month']:02d}-15", "class_types": []}]
+
+    monkeypatch.setattr(umschool, "get", fake_get)
+    import datetime as dt
+    out = run(umschool._month_days("x", dt.date(2026, 12, 10), dt.date(2027, 1, 20)))
+    assert seen == [(2026, 12), (2027, 1)] and [d["day"] for d in out] == ["2026-12-15", "2027-01-15"]
