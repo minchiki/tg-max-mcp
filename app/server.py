@@ -26,6 +26,7 @@ import dialogs
 import media
 import mes
 import mesnotify
+import umschool
 from dates import parse_when
 from safety import INSTRUCTIONS, clean, name
 from tgcfg import make_client
@@ -832,6 +833,9 @@ agent.register(tool, dict(resolve=_tg_resolve, find=_tg_find, history=_tg_histor
 if os.environ.get("MES_ENABLED", "1") != "0":
     mes.register(tool, Image)  # школьный дневник МЭШ: нужен вход deploy/mes_login.sh
 
+if os.environ.get("UMS_ENABLED", "1") != "0":
+    umschool.register(tool)  # онлайн-школа Умскул: нужен вход deploy/umschool_login.sh
+
 
 class DebugLog:
     """TG_DEBUG=1: пишет в журнал заголовки запросов и ответы с ошибкой.
@@ -873,6 +877,7 @@ class Boot:
                     agent.start()
                     dialogs.start()
                     mes.start_keepalive()
+                    umschool.start_keepalive()
                     mesnotify.start()
                 return m
             return await self.app(scope, recv, send)
