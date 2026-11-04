@@ -412,7 +412,7 @@ def register(tool):
         d = await get(f"v3/lessons/{int(lesson_id)}/")
         hw = d.get("homework") or {}
         return (f"{clean(d.get('title'), 120)} ({(d.get('class_type') or {}).get('title')}), {hhmm(d.get('start_datetime'))}, "
-                f"{d.get('video_length')} мин\nОписание: {plain(d.get('description'), 600) or '—'}\nВидео: {d.get('video') or 'нет'}\n"
+                f"{str(d.get('video_length')) + ' мин' if d.get('video_length') else 'запись ещё не выложена'}\nОписание: {plain(d.get('description'), 600) or '—'}\nВидео: {d.get('video') or 'нет'}\n"
                 f"Домашка: id {hw.get('homework_id') or '—'}, статус {hw.get('status') or '—'}")
 
     @tool()
