@@ -229,11 +229,31 @@ async def digest(now=None, force=False):
     return None
 
 
+async def evening(now=None):
+    """Если включено в настройках бота: в 18:00 присылает ДЗ на завтра (раз в день)."""
+    now = now or datetime.now(mes.TZ)
+    tomorrow = now.date() + timedelta(days=1)
+    if not st.get("hw_evening") or now.hour < 18 or st.get("evening_day") == now.date().isoformat():
+        return None
+    p = await mes.me()
+    hws = [h for h in await _homework(p, tomorrow, tomorrow) if not h.get("is_done")]
+    if hws:
+        text = f"ДЗ на завтра, {tomorrow.strftime('%d.%m')}:\n" + "\n".join(f"• {hw_line(h)}" for h in hws)
+        if not await send(text):
+            return None
+    st["evening_day"] = now.date().isoformat()
+    save()
+    return hws
+
+
 async def tick():
     if not mes.logged_in():
         return
-    await check()
-    await digest()
+    if not st.get("notify_off"):
+        await check()
+    if not st.get("digest_off"):
+        await digest()
+    await evening()
 
 
 async def loop():
@@ -255,3 +275,5 @@ def start():
     mes.load()
     _task = asyncio.get_running_loop().create_task(loop())
     log(f"включены уведомления в чат {chat()}, опрос раз в {EVERY // 60} мин")
+    import mesbot
+    mesbot.start()
