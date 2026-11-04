@@ -872,6 +872,7 @@ class Boot:
                 if m["type"] == "lifespan.startup":
                     agent.start()
                     dialogs.start()
+                    mes.start_keepalive()
                     mesnotify.start()
                 return m
             return await self.app(scope, recv, send)

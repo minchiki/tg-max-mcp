@@ -129,12 +129,53 @@ async def _refresh(stale):
                                       "Referer": "https://school.mos.ru/diary/schedules/day", "Accept": "application/json",
                                       "Content-Type": "application/json"})
         if r.status_code in (400, 401, 403):
-            raise MesAuthError("МЭШ не принял refresh-токен (он одноразовый или просрочен): войдите заново (deploy/mes_login.sh)")
+            if "revoked" in r.text:
+                raise MesAuthError("МЭШ отозвал сессию (token_revoked): так бывает, если токены скопированы из браузера и браузер "
+                                   "сам продлил или закрыл ту же сессию. Войдите заново QR-кодом: sudo bash deploy/mes_login.sh")
+            raise MesAuthError("МЭШ не принял refresh-токен (он одноразовый или просрочен): войдите заново QR-кодом (sudo bash deploy/mes_login.sh)")
         r.raise_for_status()
         d = r.json()
         if not d.get("access_token") or not d.get("refresh_token"):
             raise MesError("МЭШ вернул неполную пару токенов")
         set_tokens(d["access_token"], d["refresh_token"])  # на диск до следующего запроса
+
+
+KEEP_MARGIN = 6 * 3600   # продлеваем пару, когда access-токену осталось жить меньше этого
+_keep_task = None
+
+
+async def ensure_fresh(margin=KEEP_MARGIN, now=None):
+    """Продлить токены заранее, пока access ещё действует: цепочка refresh не обрывается, даже если запросов не было.
+    Возвращает True, если пара обновлена."""
+    if not logged_in() or not state.get("refresh"):
+        return False
+    exp = jwt_expiry(state.get("access") or "")
+    if exp and exp - (now or time.time()) > margin:
+        return False
+    await _refresh(state["access"])
+    return True
+
+
+async def _keepalive():
+    import sys
+    while True:
+        try:
+            if await ensure_fresh():
+                print("mes: токены продлены заранее", file=sys.stderr, flush=True)
+        except MesAuthError as e:
+            print(f"mes: продлить вход не удалось: {clean(str(e), 150)}", file=sys.stderr, flush=True)
+        except Exception as e:  # noqa: BLE001  сеть и т.п.: попробуем через 10 минут
+            print(f"mes: продление отложено ({type(e).__name__})", file=sys.stderr, flush=True)
+        await asyncio.sleep(600)
+
+
+def start_keepalive():
+    """Запускается при старте сервера: раз в 10 минут проверяет срок токена и продлевает его заранее."""
+    global _keep_task
+    if os.environ.get("MES_KEEPALIVE", "1") == "0" or (_keep_task and not _keep_task.done()):
+        return
+    load()
+    _keep_task = asyncio.get_running_loop().create_task(_keepalive())
 
 
 # ---------- запросы ----------

@@ -144,6 +144,36 @@ def test_refresh_failure_asks_to_login_again(net, monkeypatch):
     assert "mes_login.sh" in str(e.value)
 
 
+def _jwt(exp):
+    import base64
+    body = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+    return f"h.{body}.s"
+
+
+def test_keepalive_refreshes_before_expiry_only(net):
+    now = time.time()
+    mes.set_tokens(_jwt(now + 20 * 3600), "refresh-1")
+    assert run(mes.ensure_fresh(now=now)) is False  # ещё долго живёт — не трогаем
+    assert not any(c[1].endswith("/token/refresh") for c in net)
+    mes.set_tokens(_jwt(now + 3600), "refresh-1")
+    assert run(mes.ensure_fresh(now=now)) is True  # меньше 6 часов — продлили заранее
+    assert mes.state["access"] == "access-2" and json.load(open(mes.FILE))["refresh"] == "refresh-2"
+
+
+def test_revoked_session_explains_cause(net, monkeypatch):
+    mes.set_tokens("expired", "refresh-1")
+
+    def handler(req):
+        if req.url.path.endswith("/token/refresh"):
+            return httpx.Response(403, json={"msg": "token_revoked"})
+        return httpx.Response(401, json={})
+
+    monkeypatch.setattr(mes, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(mes.MesAuthError) as e:
+        run(mes.get("family/web/v1/marks", ttl=0))
+    assert "token_revoked" in str(e.value) and "QR" in str(e.value)
+
+
 def test_not_logged_in_message(monkeypatch):
     mes.state.clear()
     monkeypatch.setattr(mes, "FILE", os.path.join(tempfile.mkdtemp(), "none.json"))

@@ -142,7 +142,7 @@ async def check(now=None):
         evs = await _events(p, today, today + timedelta(days=1))
     except mes.MesAuthError as e:
         if not st.get("auth_alert"):
-            text = f"МЭШ: вход слетел, сервер больше не видит дневник ({clean(str(e), 150)}). Пришлите новые токены (aupd_token и aupd_refresh_token)."
+            text = f"МЭШ: вход слетел, сервер больше не видит дневник ({clean(str(e), 150)}). Войдите заново QR-кодом: sudo bash deploy/mes_login.sh"
             if await send(text):
                 st["auth_alert"] = True
                 save()

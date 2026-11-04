@@ -1,11 +1,14 @@
 """Вход в МЭШ: сохраняет токены в MES_FILE, дальше сервер обновляет их сам.
 
-  python mes_login.py            QR-вход через login.mos.ru (отсканировать приложением mos.ru / «Госуслуги Москвы»)
-  python mes_login.py --tokens   вставить aupd_token и aupd_refresh_token руками (надёжнее всего)
+  python mes_login.py            QR-вход через login.mos.ru (отсканировать приложением mos.ru / «Госуслуги Москвы»).
+                                 Лучший способ: у сервера своя сессия, браузер и телефон её не трогают.
+  python mes_login.py --tokens   вставить aupd_token и aupd_refresh_token руками
   python mes_login.py --stdin    то же, но две строки (access, refresh) читаются из stdin
 
-Где взять токены: в браузере открыть school.mos.ru, войти, F12 → Application (Приложение) → Cookies → school.mos.ru,
-скопировать значения aupd_token и aupd_refresh_token. Они дают доступ к дневнику: никому не показывайте.
+Токены из браузера: открыть school.mos.ru в окне ИНКОГНИТО, войти, F12 → Application (Приложение) → Cookies → school.mos.ru,
+скопировать aupd_token и aupd_refresh_token и закрыть окно, НЕ нажимая «Выйти». Если брать токены из обычного окна,
+браузер сам продлит ту же сессию и копия на сервере станет недействительной (МЭШ ответит token_revoked).
+Токены дают доступ к дневнику: никому не показывайте.
 """
 import asyncio
 import getpass
