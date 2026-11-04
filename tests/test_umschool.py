@@ -49,6 +49,10 @@ def net(monkeypatch):
             body = json.loads(req.content)
             if body.get("password") != "good":
                 return httpx.Response(400, json={"errors": [{"detail": "Неверный пароль"}]})
+            return httpx.Response(200, json={"access": "oid-token", "refresh": "oid-ref"})
+        if p.endswith("/v2/auth/o/login/"):
+            if json.loads(req.content) != {"access": "oid-token"}:
+                return httpx.Response(400, json={})
             return httpx.Response(200, json={"access": "acc-1", "refresh": "ref-1"})
         if p.endswith("/auth/refresh/"):
             return httpx.Response(200, json={"access": "acc-2"})

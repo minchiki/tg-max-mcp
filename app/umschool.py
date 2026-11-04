@@ -122,9 +122,17 @@ async def login(email, password):
         except ValueError:
             detail = ""
         raise UmsAuthError(f"Умскул не принял вход ({r.status_code}): {clean(detail, 200) or 'проверьте почту и пароль'}")
+    oid_access, _ = _pair(r.json())
+    if not oid_access:
+        raise UmsError("Умскул вернул ответ без токена доступа")
+    # кабинет обменивает токен входа (oid) на свою пару токенов, как его страница /oauth-callback
+    async with _http() as h:
+        r = await h.post(f"{API}/v2/auth/o/login/", json={"access": oid_access})
+    if r.status_code >= 400:
+        raise UmsAuthError(f"Вход прошёл, но кабинет не принял токен ({r.status_code}): {clean(r.text, 200)}")
     access, refresh = _pair(r.json())
     if not access:
-        raise UmsError("Умскул вернул ответ без токена доступа")
+        raise UmsError("Кабинет Умскула вернул ответ без токена доступа")
     old = dict(state)
     set_tokens(access, refresh)
     try:
