@@ -112,6 +112,38 @@ def _pair(d):
     return find(d, ("access", "access_token", "accessToken")), find(d, ("refresh", "refresh_token", "refreshToken"))
 
 
+CLIENT_ID = "9VzxpopERpimczRNQrUAWiRURUzzThgHd1Wx0WzO"   # публичный id приложения nd.umschool.net (виден в его скриптах)
+CLIENT_REDIRECT = "https://nd.umschool.net/oauth-callback"
+ID_CALLBACK = "https://id.umschool.net/callback/oauth"
+
+
+async def _oauth_token(oid_access):
+    """OAuth «код + PKCE», как делает страница входа: токен входа -> код -> OAuth-токен для кабинета."""
+    import base64
+    import hashlib
+    import secrets
+    from urllib.parse import parse_qs, urlencode, urlparse
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    redirect_uri = f"{ID_CALLBACK}?{urlencode({'client_id': CLIENT_ID, 'client_redirect': CLIENT_REDIRECT})}"
+    q = {"response_type": "code", "client_id": CLIENT_ID, "redirect_uri": redirect_uri, "scope": "read write",
+         "state": secrets.token_urlsafe(16), "code_challenge": challenge, "code_challenge_method": "S256", "jwt_token": oid_access}
+    async with _http() as h:
+        r = await h.get(f"{OID}/o/authorize/", params=q)
+        loc = r.headers.get("location", "")
+        code = (parse_qs(urlparse(loc).query).get("code") or [""])[0]
+        if not code:
+            raise UmsAuthError(f"Умскул не выдал код авторизации ({r.status_code}): {clean(loc.split('?')[0] or r.text, 160)}")
+        r = await h.post(f"{OID}/o/token/", data={"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
+                                                  "client_id": CLIENT_ID, "code_verifier": verifier})
+    if r.status_code >= 400:
+        raise UmsAuthError(f"Умскул не выдал токен по коду ({r.status_code}): {clean(r.text, 160)}")
+    token = r.json().get("access_token")
+    if not token:
+        raise UmsError("Умскул вернул ответ без OAuth-токена")
+    return token
+
+
 async def login(email, password):
     """Вход по почте и паролю. Возвращает профиль. Пароль нигде не сохраняется и не попадает в сообщения об ошибках."""
     async with _http() as h:
@@ -125,9 +157,10 @@ async def login(email, password):
     oid_access, _ = _pair(r.json())
     if not oid_access:
         raise UmsError("Умскул вернул ответ без токена доступа")
-    # кабинет обменивает токен входа (oid) на свою пару токенов, как его страница /oauth-callback
+    oauth_access = await _oauth_token(oid_access)
+    # кабинет обменивает OAuth-токен на свою пару токенов, как его страница /oauth-callback
     async with _http() as h:
-        r = await h.post(f"{API}/v2/auth/o/login/", json={"access": oid_access})
+        r = await h.post(f"{API}/v2/auth/o/login/", json={"access": oauth_access})
     if r.status_code >= 400:
         raise UmsAuthError(f"Вход прошёл, но кабинет не принял токен ({r.status_code}): {clean(r.text, 200)}")
     access, refresh = _pair(r.json())

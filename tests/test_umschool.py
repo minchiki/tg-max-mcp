@@ -50,8 +50,16 @@ def net(monkeypatch):
             if body.get("password") != "good":
                 return httpx.Response(400, json={"errors": [{"detail": "Неверный пароль"}]})
             return httpx.Response(200, json={"access": "oid-token", "refresh": "oid-ref"})
+        if p.endswith("/o/authorize/"):
+            q = req.url.params
+            assert q["jwt_token"] == "oid-token" and q["code_challenge_method"] == "S256" and q["client_id"]
+            return httpx.Response(302, headers={"location": q["redirect_uri"] + "&code=CODE1&state=" + q["state"]})
+        if p.endswith("/o/token/"):
+            form = dict(x.split("=", 1) for x in req.content.decode().split("&"))
+            assert form["code"] == "CODE1" and form["grant_type"] == "authorization_code" and form["code_verifier"]
+            return httpx.Response(200, json={"access_token": "oauth-tok"})
         if p.endswith("/v2/auth/o/login/"):
-            if json.loads(req.content) != {"access": "oid-token"}:
+            if json.loads(req.content) != {"access": "oauth-tok"}:
                 return httpx.Response(400, json={})
             return httpx.Response(200, json={"access": "acc-1", "refresh": "ref-1"})
         if p.endswith("/auth/refresh/"):
