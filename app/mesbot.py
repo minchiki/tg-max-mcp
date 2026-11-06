@@ -195,16 +195,15 @@ async def view_marks():
 async def view_food(d):
     today = datetime.now(mes.TZ).date()
     p = await mes.me()
-    menu = await mes.food("food/meals/v3/menu/complexes", p, **{"from": d.isoformat(), "to": d.isoformat(), "withPreorder": "in"})
     out = []
-    for day in menu or []:
-        for c in day.get("items") or []:
-            rows = []
-            for ci in c.get("complexItems") or []:
-                x = ci.get("dish") or ci
-                w = f" · {x['weight']} г" if x.get("weight") else ""
-                rows.append(f"• {esc(x.get('name', '?'))}{w}")
-            out.append(f"<b>{esc(c.get('name'))}</b> · {esc(mes.rub(c.get('price')))}\n" + "\n".join(rows))
+    for c, free in await mes.menu_complexes(p, d, "всё"):
+        rows = []
+        for ci in c.get("complexItems") or []:
+            x = ci.get("dish") or ci
+            w = f" · {x['weight']} г" if x.get("weight") else ""
+            rows.append(f"• {esc(x.get('name', '?'))}{w}")
+        tag = "🆓 льготное" if free else "платное"
+        out.append(f"<b>{esc(c.get('name'))}</b> · {tag} · {esc(mes.price_label(c, free))}\n" + "\n".join(rows))
     bal = ""
     try:
         b = await mes.food("food/meals/v3/clients/balance", p)

@@ -45,7 +45,7 @@ def n(monkeypatch, tmp_path):
         if path.endswith("balance"):
             return [{"balance": 1300}]
         if path.endswith("complexes"):
-            return [{"items": [{"name": "Обед", "price": 36303}]}]
+            return [{"items": [{"id": 1, "name": "Обед", "price": 36303, "paymentTypes": [0]}]}]
         return {}
 
     monkeypatch.setattr(mesnotify, "send", fake_send)
@@ -106,7 +106,7 @@ def test_morning_digest_once_per_day_and_only_in_time(n):
     run(mesnotify.digest(NOW))
     assert len(sent) == 1
     t = sent[0]
-    assert "08:30 Алгебра, каб. 301" in t and "История" in t and "13 ₽" in t and "Обед 363.03 ₽" in t
+    assert "08:30 Алгебра, каб. 301" in t and "История" in t and "13 ₽" in t and "льготное меню: Обед" in t
 
 
 def test_sunday_digest_has_subject_summary(n, monkeypatch):

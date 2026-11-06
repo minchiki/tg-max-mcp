@@ -1,0 +1,6 @@
+[Unit]
+Description=tg-max-mcp: selfcheck
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/tg-mcp/deploy/selfcheck.sh

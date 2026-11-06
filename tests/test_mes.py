@@ -45,7 +45,7 @@ FOOD_BALANCE = [{"clientId": {"personId": "person-uid-1"}, "contractId": 99, "ba
                  "expenseConstraints": {"expenseDayLimit": 20000}}]
 FOOD_ORDERS = {"hasNext": False, "orders": [{"status": 3, "deliveredAt": "2026-11-03T11:15:17+03:00", "totalPrice": 0, "items": [
     {"complex": {"name": "Завтрак 5-11", "complexItems": [{"name": "Гречка"}, {"name": "Компот"}]}}]}]}
-FOOD_MENU = [{"onDate": "2026-11-05", "items": [{"name": "Обед", "price": 36303, "complexItems": [
+FOOD_MENU = [{"onDate": "2026-11-05", "items": [{"id": 1, "name": "Обед", "price": 36303, "paymentTypes": [0], "complexItems": [
     {"dish": {"name": "Пельмени", "weight": "180", "calories": 335}}]}]}]
 
 
@@ -262,9 +262,9 @@ def test_meals_and_menu_work_for_student_without_contract(net):
     assert "Баланс: 13 ₽" in out and "лимит в день 200 ₽" in out
     assert "выдан" in out and "бесплатно" in out and "Гречка, Компот" in out
     menu = run(TOOLS["mes_menu"]("2026-11-05"))
-    assert "Обед" in menu and "363.03 ₽" in menu and "Пельмени, 180 г, 335 ккал" in menu
+    assert "Обед" in menu and "бесплатно по льготе (стоимость 363.03 ₽)" in menu and "Пельмени, 180 г, 335 ккал" in menu
     q = [c[3] for c in net if c[1].endswith("/menu/complexes")][0]
-    assert q["withPreorder"] == "in" and "person-uid-1" in q["clientId"]
+    assert q["withPreorder"] == "ex" and "person-uid-1" in q["clientId"]
 
 
 def test_homework_read_turns_photo_into_text(net, monkeypatch):
@@ -290,3 +290,17 @@ def test_read_photo_needs_gemini_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(mes.MesError, match="GEMINI_API_KEY"):
         run(mes.read_photo(b"x", "image/jpeg"))
+
+
+def test_menu_kinds_split_free_and_paid(net, monkeypatch):
+    async def fake_food(path, p, **params):
+        free = params["withPreorder"] == "ex"
+        items = ([{"id": 1, "name": "Обед", "price": 36303, "paymentTypes": [0]}] if free else
+                 [{"id": 2, "name": "Экспресс", "price": 33300, "paymentTypes": [1]}, {"id": 1, "name": "Обед", "price": 36303, "paymentTypes": [0]}])
+        return [{"onDate": "2026-11-05", "items": items}]
+
+    monkeypatch.setattr(mes, "food", fake_food)
+    import datetime as dt
+    d = dt.date(2026, 11, 5)
+    names = lambda k: [c["name"] for c, _ in run(mes.menu_complexes({}, d, k))]
+    assert names("льготное") == ["Обед"] and names("платное") == ["Экспресс"] and names("всё") == ["Обед", "Экспресс"]

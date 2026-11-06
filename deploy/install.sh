@@ -30,7 +30,10 @@ fi
 chown root:tgmcp "$ENVF" && chmod 640 "$ENVF"
 
 cp "$ROOT/deploy/tg-mcp.service" /etc/systemd/system/tg-mcp.service
+mkdir -p "$APP/deploy" && cp "$ROOT"/deploy/backup.sh "$ROOT"/deploy/selfcheck.sh "$APP/deploy/"
+cp "$ROOT"/deploy/tg-mcp-backup.* "$ROOT"/deploy/tg-mcp-selfcheck.* /etc/systemd/system/
 systemctl daemon-reload
+systemctl enable --now tg-mcp-backup.timer tg-mcp-selfcheck.timer
 systemctl is-active --quiet tg-mcp && systemctl restart tg-mcp
 
 if [ -n "${NEW_ENV:-}" ]; then

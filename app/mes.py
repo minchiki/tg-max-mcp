@@ -437,6 +437,34 @@ VISION_PROMPT = ("Это фото домашнего задания по шко�
                  "Неразборчивое помечай [неразборчиво]. Если на фото несколько заданий или страниц, перепиши все по порядку.")
 
 
+async def menu_complexes(p, d, kind="льготное"):
+    """Меню столовой на день: [(комплекс, льготный?)], льготные первыми. Льготное меню МЭШ отдаёт отдельно
+    (withPreorder=ex, paymentTypes содержит 0): его выдают бесплатно; остальное — платное по предзаказу."""
+    seen, res = set(), []
+    for flag in ("ex", "in"):
+        try:
+            data = await food("food/meals/v3/menu/complexes", p, **{"from": d.isoformat(), "to": d.isoformat(), "withPreorder": flag})
+        except MesError:
+            if flag == "in":
+                raise
+            continue
+        for day in data or []:
+            for c in day.get("items") or []:
+                key = (c.get("id"), c.get("name"))
+                if key not in seen:
+                    seen.add(key)
+                    res.append((c, 0 in (c.get("paymentTypes") or [])))
+    if kind.startswith("плат"):
+        res = [x for x in res if not x[1]]
+    elif not kind.startswith(("всё", "все")):
+        res = [x for x in res if x[1]]
+    return sorted(res, key=lambda x: not x[1])
+
+
+def price_label(c, free):
+    return f"бесплатно по льготе (стоимость {rub(c.get('price'))})" if free else rub(c.get("price"))
+
+
 async def read_photo(data, ctype):
     """Распознать фото задания моделью Gemini (ключ GEMINI_API_KEY на сервере, через тот же прокси, что и у агента)."""
     import base64
@@ -677,22 +705,21 @@ def register(tool, Image=None):
         return clean("\n".join(out), RAW_LIMIT)
 
     @tool()
-    async def mes_menu(date: str = "") -> str:
-        """МЭШ: меню школьной столовой на день (по умолчанию сегодня): комплексы, блюда, калории, цена."""
+    async def mes_menu(date: str = "", kind: str = "льготное") -> str:
+        """МЭШ: меню школьной столовой на день (по умолчанию сегодня). kind: «льготное» (по умолчанию: то, что ученику выдают бесплатно),
+        «платное» (по предзаказу) или «всё». Блюда, граммы, калории."""
         p = await student()
-        d = _day(date).isoformat()
-        data = await food("food/meals/v3/menu/complexes", p, **{"from": d, "to": d, "withPreorder": "in"})
+        d = _day(date)
         out = []
-        for day in data or []:
-            for c in day.get("items") or []:
-                rows = []
-                for ci in c.get("complexItems") or []:
-                    x = ci.get("dish") or ci
-                    kc = f", {x['calories']} ккал" if x.get("calories") else ""
-                    w = f", {x['weight']} г" if x.get("weight") else ""
-                    rows.append(f"  - {x.get('name', '?')}{w}{kc}")
-                out.append(f"{day.get('onDate', d)} · {c.get('name')} · {rub(c.get('price'))}\n" + "\n".join(rows))
-        return clean("\n".join(out) or f"На {d} меню нет.", RAW_LIMIT)
+        for c, free in await menu_complexes(p, d, kind):
+            rows = []
+            for ci in c.get("complexItems") or []:
+                x = ci.get("dish") or ci
+                kc = f", {x['calories']} ккал" if x.get("calories") else ""
+                w = f", {x['weight']} г" if x.get("weight") else ""
+                rows.append(f"  - {x.get('name', '?')}{w}{kc}")
+            out.append(f"{d.isoformat()} · {c.get('name')} · {price_label(c, free)}\n" + "\n".join(rows))
+        return clean("\n".join(out) or f"На {d.isoformat()} {kind} меню нет.", RAW_LIMIT)
 
     @tool()
     async def mes_visits(date_from: str = "", date_to: str = "", contract_id: int = 0) -> str:

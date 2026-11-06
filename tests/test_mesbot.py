@@ -44,7 +44,7 @@ def bot(monkeypatch, tmp_path):
         if path.endswith("balance"):
             return [{"balance": 1300}]
         if path.endswith("complexes"):
-            return [{"items": [{"name": "Обед", "price": 36303, "complexItems": [{"name": "Суп", "weight": 200}]}]}]
+            return [{"items": [{"id": 1, "name": "Обед", "price": 36303, "paymentTypes": [0], "complexItems": [{"name": "Суп", "weight": 200}]}]}]
         return {}
 
     monkeypatch.setattr(mesbot, "api", fake_api)

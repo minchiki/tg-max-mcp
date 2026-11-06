@@ -1,0 +1,9 @@
+[Unit]
+Description=Ежедневная проверка МЭШ и Умскула
+
+[Timer]
+OnCalendar=*-*-* 06:40:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

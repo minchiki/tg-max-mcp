@@ -215,9 +215,8 @@ async def digest(now=None, force=False):
             parts.append("Оценки за последние дни:\n" + "\n".join(f"• {m.get('date')} {mark_line(m)}" for m in ms))
         try:
             bal = await mes.food("food/meals/v3/clients/balance", p)
-            menu = await mes.food("food/meals/v3/menu/complexes", p, **{"from": today.isoformat(), "to": today.isoformat(), "withPreorder": "in"})
-            names = [f"{c.get('name')} {mes.rub(c.get('price'))}" for d in menu or [] for c in d.get("items") or []]
-            parts.append(f"Питание: на карте {mes.rub(bal[0].get('balance')) if bal else '?'}" + (f"; в меню: {', '.join(names)}" if names else ""))
+            names = [c.get("name") for c, _ in await mes.menu_complexes(p, today, "льготное")]
+            parts.append(f"Питание: на карте {mes.rub(bal[0].get('balance')) if bal else '?'}" + (f"; льготное меню: {', '.join(names)}" if names else ""))
         except mes.MesError as e:
             log(f"питание в сводке пропущено: {clean(str(e), 100)}")
     text = "\n\n".join(parts)
